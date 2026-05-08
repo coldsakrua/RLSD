@@ -85,6 +85,8 @@ def main():
         training_args.run_name = script_args.run_config
 
     training_args.remove_unused_columns = False
+    if training_args.gradient_checkpointing and getattr(training_args, "gradient_checkpointing_kwargs", None) in (None, {}):
+        training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
 
     model_init_kwargs = dict(training_args.model_init_kwargs or {})
     if script_args.attn_implementation:
@@ -120,6 +122,29 @@ def main():
         rollout_filter=script_args.rollout_filter,
         teacher_prompt_template=script_args.teacher_prompt_template,
     )
+
+    # For PEFT + gradient checkpointing, force a valid gradient path from input embeddings.
+    model_for_grad = trainer.model
+    if hasattr(trainer, "accelerator"):
+        model_for_grad = trainer.accelerator.unwrap_model(model_for_grad)
+    if training_args.gradient_checkpointing:
+        if hasattr(model_for_grad, "enable_input_require_grads"):
+            model_for_grad.enable_input_require_grads()
+        if hasattr(model_for_grad, "get_input_embeddings"):
+            input_embeddings = model_for_grad.get_input_embeddings()
+            if input_embeddings is not None and hasattr(input_embeddings, "weight"):
+                input_embeddings.weight.requires_grad_(True)
+
+    trainable_param_count = sum(p.numel() for p in model_for_grad.parameters() if p.requires_grad)
+    total_param_count = sum(p.numel() for p in model_for_grad.parameters())
+    print(
+        f"[trainable] trainable_params={trainable_param_count}, "
+        f"total_params={total_param_count}, use_peft={script_args.use_peft}"
+    )
+    if trainable_param_count == 0:
+        raise RuntimeError(
+            "No trainable parameters found. Check --use_peft and --lora_target_modules."
+        )
 
     trainer.train()
     trainer.save_model(training_args.output_dir)
