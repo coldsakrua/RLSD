@@ -1,9 +1,11 @@
+import json
 import os
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from peft import LoraConfig, TaskType
-from transformers import AutoTokenizer, HfArgumentParser
+from transformers import AutoTokenizer, HfArgumentParser, TrainerCallback
 from trl import GRPOConfig
 
 from data_utils import load_rlsd_dataset
@@ -70,6 +72,45 @@ def build_peft_config(args: ScriptArguments) -> Optional[LoraConfig]:
     )
 
 
+class JsonMetricsCallback(TrainerCallback):
+    def __init__(self, jsonl_path: str):
+        self.jsonl_path = jsonl_path
+        os.makedirs(os.path.dirname(self.jsonl_path), exist_ok=True)
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+        record = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "step": int(state.global_step),
+            "epoch": float(state.epoch) if state.epoch is not None else None,
+        }
+        record.update(logs)
+        with open(self.jsonl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.flush()
+
+        # Higher-precision console line for quick monitoring in SLURM logs.
+        if "loss" in logs or "reward" in logs:
+            loss = logs.get("loss")
+            reward = logs.get("reward")
+            grad_norm = logs.get("grad_norm")
+            lr = logs.get("learning_rate")
+            msg = f"[metrics] step={int(state.global_step)}"
+            if loss is not None:
+                msg += f" loss={float(loss):.8f}"
+            extras = []
+            if reward is not None:
+                extras.append(f"reward={float(reward):.6f}")
+            if grad_norm is not None:
+                extras.append(f"grad_norm={float(grad_norm):.6f}")
+            if lr is not None:
+                extras.append(f"lr={float(lr):.10f}")
+            if extras:
+                msg += " " + " ".join(extras)
+            print(msg)
+
+
 def main():
     parser = HfArgumentParser((ScriptArguments, GRPOConfig))
     script_args, training_args = parser.parse_args_into_dataclasses()
@@ -122,6 +163,9 @@ def main():
         rollout_filter=script_args.rollout_filter,
         teacher_prompt_template=script_args.teacher_prompt_template,
     )
+    metrics_jsonl_path = os.path.join(training_args.output_dir, "train_metrics.jsonl")
+    trainer.add_callback(JsonMetricsCallback(metrics_jsonl_path))
+    print(f"[metrics] jsonl_path={metrics_jsonl_path}")
 
     # For PEFT + gradient checkpointing, force a valid gradient path from input embeddings.
     model_for_grad = trainer.model
