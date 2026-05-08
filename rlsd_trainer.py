@@ -224,14 +224,21 @@ class RLSDTrainer(GRPOTrainer):
             raise ValueError(f"advantages must be 1D or 2D, got shape={tuple(advantages.shape)}")
 
         old_per_token_logps = inputs.get("old_per_token_logps")
-        if old_per_token_logps is not None:
-            log_ratio = per_token_logps - old_per_token_logps
-        else:
-            log_ratio = torch.zeros_like(per_token_logps)
+        if old_per_token_logps is None:
+            # Keep a valid gradient path even when we don't cache old-policy logps
+            # (common for single-iteration updates).
+            old_per_token_logps = per_token_logps.detach()
+        log_ratio = per_token_logps - old_per_token_logps
 
         importance_sampling_level = getattr(self.args, "importance_sampling_level", "token")
         if importance_sampling_level == "sequence":
-            log_importance_weights = torch.sum(log_ratio * completion_mask, dim=1, keepdim=True)
+            denom = completion_mask.sum(dim=1, keepdim=True).clamp(min=1)
+            log_importance_weights = torch.sum(log_ratio * completion_mask, dim=1, keepdim=True) / denom
+        elif importance_sampling_level == "sequence_token":
+            denom = completion_mask.sum(dim=1, keepdim=True).clamp(min=1)
+            seq_part = (torch.sum(log_ratio * completion_mask, dim=1, keepdim=True) / denom).detach()
+            token_part = per_token_logps - per_token_logps.detach()
+            log_importance_weights = seq_part + token_part
         else:
             log_importance_weights = log_ratio
 
