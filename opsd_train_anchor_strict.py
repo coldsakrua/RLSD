@@ -1,8 +1,8 @@
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from peft import LoraConfig, TaskType
 from transformers import AutoTokenizer, HfArgumentParser, TrainerCallback
@@ -10,8 +10,7 @@ from trl import GRPOConfig
 
 from data_utils import load_rlsd_dataset
 from reward_fn import verifiable_math_reward
-from rlsd_trainer import RLSDTrainer
-from rlsd_sign_fallback_trainer import RLSDSignFallbackTrainer
+from rlsd_sign_fallback_strict_trainer import RLSDSignFallbackStrictTrainer
 
 
 @dataclass
@@ -20,16 +19,31 @@ class ScriptArguments:
     dataset_path: str
     dataset_split: str = "train"
     dataset_cache_dir: Optional[str] = None
-    run_config: str = "rlsd_anchor"
+    run_config: str = "rlsd_strict_4b"
 
+    # mixed-group RLSD
     lmbda: float = 0.5
     lmbda_decay_steps: int = 50
-    jsd_token_clip: float = 0.2
+    jsd_token_clip: float = 0.05
     rollout_filter: str = "all"
-    fixed_teacher: bool = False
+    fixed_teacher: bool = True
     teacher_prompt_template: str = (
         "{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n"
     )
+
+    # all-correct/all-wrong fallback
+    lambda_plus: float = 0.03
+    lambda_minus: float = 0.03
+    lambda_plus_min: float = 0.0
+    lambda_minus_min: float = 0.0
+    fallback_decay_steps: int = 200
+    fallback_eps0: float = 0.05
+    adv_clip_low: float = -1.0
+    adv_clip_high: float = 1.0
+    suppress_gt_shortcut: bool = True
+    answer_token_downweight: float = 0.2
+    reward_binary_threshold: float = 0.5
+    fallback_tail_tokens: int = 8
 
     max_length: Optional[int] = None
     attn_implementation: Optional[str] = None
@@ -43,19 +57,6 @@ class ScriptArguments:
     )
 
     disable_wandb: bool = False
-
-    use_sign_constrained_fallback: bool = True
-    lambda_plus: float = 0.05
-    lambda_minus: float = 0.05
-    lambda_plus_min: float = 0.0
-    lambda_minus_min: float = 0.0
-    fallback_decay_steps: int = 200
-    fallback_eps0: float = 0.05
-    adv_clip_low: float = -1.0
-    adv_clip_high: float = 1.0
-    suppress_gt_shortcut: bool = True
-    answer_token_downweight: float = 0.2
-    reward_binary_threshold: float = 0.5
 
 
 def _to_text_completion(completion) -> str:
@@ -104,26 +105,6 @@ class JsonMetricsCallback(TrainerCallback):
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
 
-        # Higher-precision console line for quick monitoring in SLURM logs.
-        if "loss" in logs or "reward" in logs:
-            loss = logs.get("loss")
-            reward = logs.get("reward")
-            grad_norm = logs.get("grad_norm")
-            lr = logs.get("learning_rate")
-            msg = f"[metrics] step={int(state.global_step)}"
-            if loss is not None:
-                msg += f" loss={float(loss):.8f}"
-            extras = []
-            if reward is not None:
-                extras.append(f"reward={float(reward):.6f}")
-            if grad_norm is not None:
-                extras.append(f"grad_norm={float(grad_norm):.6f}")
-            if lr is not None:
-                extras.append(f"lr={float(lr):.10f}")
-            if extras:
-                msg += " " + " ".join(extras)
-            print(msg)
-
 
 def main():
     parser = HfArgumentParser((ScriptArguments, GRPOConfig))
@@ -131,11 +112,9 @@ def main():
 
     if script_args.dataset_cache_dir:
         os.environ["HF_DATASETS_CACHE"] = script_args.dataset_cache_dir
-
     if script_args.disable_wandb:
         os.environ["WANDB_DISABLED"] = "true"
         training_args.report_to = []
-
     if script_args.run_config:
         training_args.run_name = script_args.run_config
 
@@ -163,8 +142,7 @@ def main():
 
     peft_config = build_peft_config(script_args)
 
-    trainer_cls = RLSDSignFallbackTrainer if script_args.use_sign_constrained_fallback else RLSDTrainer
-    trainer_kwargs = dict(
+    trainer = RLSDSignFallbackStrictTrainer(
         model=script_args.model_name_or_path,
         reward_funcs=reward_fn,
         args=training_args,
@@ -177,27 +155,24 @@ def main():
         fixed_teacher=script_args.fixed_teacher,
         rollout_filter=script_args.rollout_filter,
         teacher_prompt_template=script_args.teacher_prompt_template,
+        lambda_plus=script_args.lambda_plus,
+        lambda_minus=script_args.lambda_minus,
+        lambda_plus_min=script_args.lambda_plus_min,
+        lambda_minus_min=script_args.lambda_minus_min,
+        fallback_decay_steps=script_args.fallback_decay_steps,
+        fallback_eps0=script_args.fallback_eps0,
+        adv_clip_low=script_args.adv_clip_low,
+        adv_clip_high=script_args.adv_clip_high,
+        suppress_gt_shortcut=script_args.suppress_gt_shortcut,
+        answer_token_downweight=script_args.answer_token_downweight,
+        reward_binary_threshold=script_args.reward_binary_threshold,
+        fallback_tail_tokens=script_args.fallback_tail_tokens,
     )
-    if script_args.use_sign_constrained_fallback:
-        trainer_kwargs.update(
-            lambda_plus=script_args.lambda_plus,
-            lambda_minus=script_args.lambda_minus,
-            lambda_plus_min=script_args.lambda_plus_min,
-            lambda_minus_min=script_args.lambda_minus_min,
-            fallback_decay_steps=script_args.fallback_decay_steps,
-            fallback_eps0=script_args.fallback_eps0,
-            adv_clip_low=script_args.adv_clip_low,
-            adv_clip_high=script_args.adv_clip_high,
-            suppress_gt_shortcut=script_args.suppress_gt_shortcut,
-            answer_token_downweight=script_args.answer_token_downweight,
-            reward_binary_threshold=script_args.reward_binary_threshold,
-        )
-    trainer = trainer_cls(**trainer_kwargs)
+
     metrics_jsonl_path = os.path.join(training_args.output_dir, "train_metrics.jsonl")
     trainer.add_callback(JsonMetricsCallback(metrics_jsonl_path))
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
 
-    # For PEFT + gradient checkpointing, force a valid gradient path from input embeddings.
     model_for_grad = trainer.model
     if hasattr(trainer, "accelerator"):
         model_for_grad = trainer.accelerator.unwrap_model(model_for_grad)
