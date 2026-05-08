@@ -25,7 +25,7 @@ export VLLM_HOST_IP=127.0.0.1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
-DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/train/train.parquet}
+DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/aggregated_l3plus/train.parquet}
 OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b}
 RUN_CONFIG=${RUN_CONFIG:-rlsd_4b}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
@@ -73,7 +73,7 @@ accelerate launch \
     --run_config "${RUN_CONFIG}" \
     --max_steps "${MAX_STEPS}" \
     --num_generations "${NUM_GENERATIONS}" \
-    --max_completion_length 1536 \
+    --max_completion_length 3072 \
     --save_steps 25 \
     --logging_steps 2 \
     --attn_implementation sdpa \

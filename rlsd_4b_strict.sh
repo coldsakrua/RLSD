@@ -37,7 +37,7 @@ GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
 PER_DEVICE_BS=${PER_DEVICE_BS:-2}
 MAX_STEPS=${MAX_STEPS:-300}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
-VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.60}
+VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.4}
 
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
 LMBDA=${LMBDA:-0.5}
@@ -79,7 +79,7 @@ accelerate launch \
     --run_config "${RUN_CONFIG}" \
     --max_steps "${MAX_STEPS}" \
     --num_generations "${NUM_GENERATIONS}" \
-    --max_completion_length 1536 \
+    --max_completion_length 3072 \
     --save_steps 25 \
     --logging_steps 2 \
     --attn_implementation sdpa \
