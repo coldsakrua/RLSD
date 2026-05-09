@@ -44,6 +44,9 @@ class ScriptArguments:
     answer_token_downweight: float = 0.2
     reward_binary_threshold: float = 0.5
     fallback_tail_tokens: int = 8
+    # DAPO-style asymmetric clipping for positive-advantage samples:
+    # upper clip bound becomes (1 + epsilon_high) for adv>0.
+    dapo_epsilon_high: Optional[float] = None
 
     max_length: Optional[int] = None
     attn_implementation: Optional[str] = None
@@ -117,6 +120,9 @@ def main():
         training_args.report_to = []
     if script_args.run_config:
         training_args.run_name = script_args.run_config
+
+    if script_args.dapo_epsilon_high is not None:
+        setattr(training_args, "epsilon_high", float(script_args.dapo_epsilon_high))
 
     training_args.remove_unused_columns = False
     if training_args.gradient_checkpointing and getattr(training_args, "gradient_checkpointing_kwargs", None) in (None, {}):

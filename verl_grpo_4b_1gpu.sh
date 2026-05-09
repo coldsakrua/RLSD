@@ -19,7 +19,14 @@ export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# verl 的 worker 检测到同时存在 ROCR_VISIBLE_DEVICES 与 CUDA_VISIBLE_DEVICES
+# 会直接 raise ValueError，集群偶尔会自动注入 ROCR_VISIBLE_DEVICES，这里强制清掉。
+unset ROCR_VISIBLE_DEVICES
+
+# vLLM 的 CuMemAllocator 与 PyTorch 的 expandable_segments 不兼容，
+# 启用 expandable_segments 时 init vllm worker 会断言失败，因此这里显式清掉。
+unset PYTORCH_CUDA_ALLOC_CONF
 
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
 RAW_DATA_PARQUET=${RAW_DATA_PARQUET:-${BASE_DIR}/data/aggregated_l3plus/train.parquet}
@@ -40,6 +47,12 @@ VLLM_MEM_UTIL=${VLLM_MEM_UTIL:-0.55}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-3}
 SAVE_FREQ=${SAVE_FREQ:-50}
 TEST_FREQ=${TEST_FREQ:-25}
+
+# verl 校验：train_batch_size >= ppo_mini_batch_size，否则 _validate_config 会断言失败。
+if [ "${PPO_MINIBATCH}" -gt "${TRAIN_BATCH_SIZE}" ]; then
+  echo "[warn] PPO_MINIBATCH=${PPO_MINIBATCH} > TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE}, clamp to ${TRAIN_BATCH_SIZE}"
+  PPO_MINIBATCH="${TRAIN_BATCH_SIZE}"
+fi
 
 mkdir -p "${VERL_DATA_DIR}" "${OUTPUT_DIR}"
 
@@ -69,7 +82,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINIBATCH}" \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_PER_GPU}" \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
-  actor_rollout_ref.actor.fsdp_config.grad_offload=False \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
   actor_rollout_ref.rollout.name=vllm \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${LOGPROB_MICRO_PER_GPU}" \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \

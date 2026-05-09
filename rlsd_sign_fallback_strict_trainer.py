@@ -262,18 +262,19 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         mixed_mask = self._rollout_mask(seq_advantages).unsqueeze(1)
         mixed_adv = torch.where(mixed_mask, mixed_adv, base_adv)
 
-        # all-correct: positive-only fallback
+        # all-correct: positive fallback with interpolation (mixed-style).
+        # lambda_plus_now now acts as interpolation coefficient alpha in [min, start].
         w_plus = torch.clamp(torch.exp(g), min=clip_low, max=clip_high)
-        plus_01 = self._rowwise_minmax_01(w_plus, completion_mask)
-        plus_raw = (self.fallback_eps0 + plus_01) * completion_mask
         lambda_plus_now = self._current_fallback_lambda(self.lambda_plus, self.lambda_plus_min)
-        plus_adv = self._normalize_mean_abs(plus_raw, completion_mask, lambda_plus_now)
+        plus_base = torch.full_like(g, float(self.fallback_eps0)) * completion_mask
+        plus_adv = plus_base * ((1.0 - lambda_plus_now) + lambda_plus_now * w_plus)
 
-        # all-wrong: negative-only fallback
-        support = self._rowwise_minmax_01(torch.exp(torch.clamp(g, min=-20.0, max=20.0)), completion_mask)
-        minus_raw = -(self.fallback_eps0 + (1.0 - support)) * completion_mask
+        # all-wrong: negative fallback with interpolation (mixed-style).
+        # Use exp(-g) so higher teacher-over-student confidence gives stronger negative pressure.
+        w_minus = torch.clamp(torch.exp(-g), min=clip_low, max=clip_high)
         lambda_minus_now = self._current_fallback_lambda(self.lambda_minus, self.lambda_minus_min)
-        minus_adv = self._normalize_mean_abs(minus_raw, completion_mask, lambda_minus_now)
+        minus_base = -torch.full_like(g, float(self.fallback_eps0)) * completion_mask
+        minus_adv = minus_base * ((1.0 - lambda_minus_now) + lambda_minus_now * w_minus)
 
         token_adv = torch.zeros_like(mixed_adv)
         token_adv = torch.where(mixed, mixed_adv, token_adv)
@@ -287,12 +288,46 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
 
         batch["advantages"] = token_adv
 
+        # Per-group reward diagnostics.
+        # Prompt-level grouping: [num_prompts, num_generations].
+        # A group reward mean is computed over all completions that belong to prompts in that group.
+        sample_all_correct = all_correct.squeeze(1)
+        sample_all_wrong = all_wrong.squeeze(1)
+        sample_mixed = mixed.squeeze(1)
+
+        def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> float:
+            count = int(mask.sum().item())
+            if count <= 0:
+                return 0.0
+            return float(values[mask].mean().item())
+
+        prompt_count_all_correct = int(all_correct_group.sum().item())
+        prompt_count_all_wrong = int(all_wrong_group.sum().item())
+        prompt_count_mixed = int(mixed_group.sum().item())
+
+        completion_count_all_correct = int(prompt_count_all_correct * self.num_generations)
+        completion_count_all_wrong = int(prompt_count_all_wrong * self.num_generations)
+        completion_count_mixed = int(prompt_count_mixed * self.num_generations)
+
+        reward_mean_all_correct = _masked_mean(rewards_binary, sample_all_correct)
+        reward_mean_all_wrong = _masked_mean(rewards_binary, sample_all_wrong)
+        reward_mean_mixed = _masked_mean(rewards_binary, sample_mixed)
+
         self._log_metric("strict/mixed_alpha", alpha_mixed)
         self._log_metric("strict/lambda_plus", lambda_plus_now)
         self._log_metric("strict/lambda_minus", lambda_minus_now)
         self._log_metric("strict/group_all_correct_frac", float(all_correct_group.float().mean().item()))
         self._log_metric("strict/group_all_wrong_frac", float(all_wrong_group.float().mean().item()))
         self._log_metric("strict/group_mixed_frac", float(mixed_group.float().mean().item()))
+        self._log_metric("strict/reward_mean_all_correct", reward_mean_all_correct)
+        self._log_metric("strict/reward_mean_all_wrong", reward_mean_all_wrong)
+        self._log_metric("strict/reward_mean_mixed", reward_mean_mixed)
+        self._log_metric("strict/prompt_count_all_correct", float(prompt_count_all_correct))
+        self._log_metric("strict/prompt_count_all_wrong", float(prompt_count_all_wrong))
+        self._log_metric("strict/prompt_count_mixed", float(prompt_count_mixed))
+        self._log_metric("strict/completion_count_all_correct", float(completion_count_all_correct))
+        self._log_metric("strict/completion_count_all_wrong", float(completion_count_all_wrong))
+        self._log_metric("strict/completion_count_mixed", float(completion_count_mixed))
         self._log_metric("strict/answer_weight_mean", float(answer_weights.mean().item()))
         self._log_metric("strict/adv_abs_mean", float((token_adv.abs() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()))
         return batch

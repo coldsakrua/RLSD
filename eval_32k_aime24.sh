@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o logs/eval_math_local_thinking32k.%j.out
+#SBATCH -o logs/eval_32k_aime24.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -29,10 +29,10 @@ model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/q
 
 # Thinking mode ON by default
 NO_THINKING=${NO_THINKING:-0}
-datasets_csv=${DATASETS:-aime24,aime25,aime26,math500}
+datasets_csv=${DATASETS:-aime24,aime26}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b/job_1581086/checkpoint-300}}
+checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict/job_1703652/checkpoint-150}}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
 use_lora=${USE_LORA:-1}
 num_samples=${NUM_SAMPLES:-0}
@@ -71,7 +71,7 @@ else
   _eval_cot_dir=cot
   _len_tag=38912
 fi
-output_json=${OUTPUT_JSON:-outputs/eval_math_local/${_eval_cot_dir}_${_len_tag}/eval_${run_tag}.json}
+output_json=${OUTPUT_JSON:-outputs/eval_32k_aime24/${_eval_cot_dir}_${_len_tag}/eval_${run_tag}.json}
 
 mkdir -p "$(dirname "${output_json}")"
 echo "[EVAL] model_path=${model_path}"

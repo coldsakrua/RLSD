@@ -143,15 +143,88 @@ def _is_custom_estimator(name: str) -> bool:
     return name in {"rlsd_verl", "rlsd_strict_verl"}
 
 
+def _silence_math_verify_logger() -> None:
+    """math_verify 内部 grader 在某些 SymPy 输入下会抛 AttributeError 等异常，
+    它会自己捕获并把异常以 logger.exception 打到日志里，对训练流程无害。
+    但这种 stack trace 会刷屏并污染 stdout，这里把它的 logger 噪声压住。"""
+    import logging
+
+    for name in ("math_verify", "math_verify.grader", "math_verify.utils"):
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.CRITICAL)
+        logger.propagate = False
+
+
+def _import_advantage_estimator():
+    """新版 verl 把 AdvantageEstimator 放到了 ppo.core_algos，旧版可能在 trainer.config。
+    这里做个兼容 import。"""
+    try:
+        from verl.trainer.ppo.core_algos import AdvantageEstimator  # type: ignore
+
+        return AdvantageEstimator
+    except Exception:
+        pass
+    try:
+        from verl.trainer.config import AdvantageEstimator  # type: ignore
+
+        return AdvantageEstimator
+    except Exception:
+        return None
+
+
+def _set_estimator(config, value) -> None:
+    """OmegaConf 默认是 struct 模式，需要先 open_dict 才能改 algorithm.adv_estimator。"""
+    try:
+        from omegaconf import OmegaConf, open_dict
+
+        if OmegaConf.is_config(config):
+            with open_dict(config):
+                config.algorithm.adv_estimator = value
+            return
+    except Exception:
+        pass
+    config.algorithm.adv_estimator = value
+
+
 def patch_verl_compute_advantage():
-    from verl.trainer.config import AdvantageEstimator
+    _silence_math_verify_logger()
+
+    AdvantageEstimator = _import_advantage_estimator()
     from verl.trainer.ppo import ray_trainer as ray_trainer_mod
 
     original_compute_advantage = ray_trainer_mod.compute_advantage
+    grpo_value = (
+        AdvantageEstimator.GRPO.value
+        if AdvantageEstimator is not None and hasattr(AdvantageEstimator, "GRPO")
+        else "grpo"
+    )
+
+    original_init = ray_trainer_mod.RayPPOTrainer.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        config = kwargs.get("config", args[0] if args else None)
+        original_estimator = None
+        swapped = False
+        if config is not None:
+            try:
+                original_estimator = config.algorithm.adv_estimator
+            except Exception:
+                original_estimator = None
+            name = _to_name(original_estimator) if original_estimator is not None else ""
+            if _is_custom_estimator(name):
+                _set_estimator(config, grpo_value)
+                swapped = True
+        try:
+            original_init(self, *args, **kwargs)
+        finally:
+            if swapped:
+                _set_estimator(config, original_estimator)
+
+    ray_trainer_mod.RayPPOTrainer.__init__ = _patched_init
 
     def _patched_compute_advantage(
         data,
-        adv_estimator: AdvantageEstimator,
+        adv_estimator,
         gamma: float = 1.0,
         lam: float = 1.0,
         num_repeat: int = 1,
