@@ -3,7 +3,7 @@
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
 
@@ -18,10 +18,9 @@ source activate anchor
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export VLLM_HOST_IP=127.0.0.1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+unset ROCR_VISIBLE_DEVICES
 
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/aggregated_l3plus/train.parquet}
@@ -38,6 +37,13 @@ PER_DEVICE_BS=${PER_DEVICE_BS:-1}
 MAX_STEPS=${MAX_STEPS:-300}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.6}
+TRAIN_CUDA_VISIBLE_DEVICES=${TRAIN_CUDA_VISIBLE_DEVICES:-0}
+GEN_CUDA_VISIBLE_DEVICES=${GEN_CUDA_VISIBLE_DEVICES:-1}
+VLLM_SERVER_HOST=${VLLM_SERVER_HOST:-127.0.0.1}
+VLLM_SERVER_PORT=${VLLM_SERVER_PORT:-8000}
+VLLM_SERVER_BASE_URL=${VLLM_SERVER_BASE_URL:-http://${VLLM_SERVER_HOST}:${VLLM_SERVER_PORT}}
+VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
+VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
 
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
 LMBDA=${LMBDA:-0.5}
@@ -63,7 +69,35 @@ LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"q_proj k_proj v_proj o_proj gate_pro
 LORA_R=${LORA_R:-64}
 LORA_ALPHA=${LORA_ALPHA:-128}
 
-accelerate launch \
+if [ "${TRAIN_CUDA_VISIBLE_DEVICES}" = "${GEN_CUDA_VISIBLE_DEVICES}" ]; then
+    echo "[error] TRAIN_CUDA_VISIBLE_DEVICES and GEN_CUDA_VISIBLE_DEVICES must be different."
+    exit 1
+fi
+
+VLLM_SERVER_LOG="${OUTPUT_DIR}/vllm_server.log"
+VLLM_SERVER_PID=""
+cleanup() {
+    if [ -n "${VLLM_SERVER_PID}" ] && kill -0 "${VLLM_SERVER_PID}" 2>/dev/null; then
+        kill "${VLLM_SERVER_PID}" || true
+        wait "${VLLM_SERVER_PID}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
+CUDA_VISIBLE_DEVICES="${GEN_CUDA_VISIBLE_DEVICES}" \
+PYTORCH_CUDA_ALLOC_CONF="" \
+trl vllm-serve \
+    --model "${MODEL_PATH}" \
+    --host "${VLLM_SERVER_HOST}" \
+    --port "${VLLM_SERVER_PORT}" \
+    --gpu-memory-utilization "${VLLM_GPU_MEM_UTIL}" \
+    --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}" \
+    > "${VLLM_SERVER_LOG}" 2>&1 &
+VLLM_SERVER_PID=$!
+
+echo "[launch] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES}"
+CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --config_file accelerate.yaml \
     --num_processes 1 \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
@@ -89,9 +123,11 @@ accelerate launch \
     --max_length 4096 \
     --beta 0 \
     --use_vllm \
-    --vllm_mode colocate \
+    --vllm_mode server \
+    --vllm_server_base_url "${VLLM_SERVER_BASE_URL}" \
+    --vllm_server_timeout "${VLLM_SERVER_TIMEOUT}" \
     --vllm_gpu_memory_utilization "${VLLM_GPU_MEM_UTIL}" \
-    --vllm_tensor_parallel_size 1 \
+    --vllm_tensor_parallel_size "${VLLM_TENSOR_PARALLEL_SIZE}" \
     --use_peft true \
     --lora_r "${LORA_R}" \
     --lora_alpha "${LORA_ALPHA}" \
