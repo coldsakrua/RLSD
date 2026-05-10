@@ -73,6 +73,7 @@ class ScriptArguments:
     disable_wandb: bool = False
     # When true, each checkpoint save also writes rollout_snapshot_step_*.json (last mini-batch rollout).
     save_rollout_snapshots: bool = True
+    generation_extra_kwargs_json: Optional[str] = None
 
 
 def _to_text_completion(completion) -> str:
@@ -183,6 +184,17 @@ def main():
         training_args.max_prompt_length = max(32, script_args.max_length - training_args.max_completion_length)
 
     setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
+
+    if script_args.generation_extra_kwargs_json and str(script_args.generation_extra_kwargs_json).strip():
+        try:
+            extra = json.loads(script_args.generation_extra_kwargs_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"--generation_extra_kwargs_json is not valid JSON: {e}") from e
+        if not isinstance(extra, dict):
+            raise ValueError("--generation_extra_kwargs_json must be a JSON object, e.g. '{\"presence_penalty\": 0.2}'")
+        merged = dict(training_args.generation_kwargs or {})
+        merged.update(extra)
+        training_args.generation_kwargs = merged
 
     train_dataset = load_rlsd_dataset(script_args.dataset_path, split=script_args.dataset_split)
     if script_args.prompt_prefix or script_args.prompt_suffix:

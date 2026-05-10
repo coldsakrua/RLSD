@@ -33,7 +33,7 @@ mkdir -p "${OUTPUT_DIR}"
 
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
-PER_DEVICE_BS=${PER_DEVICE_BS:-4}
+PER_DEVICE_BS=${PER_DEVICE_BS:-2}
 MAX_STEPS=${MAX_STEPS:-300}
 MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
 PROMPT_PREFIX=${PROMPT_PREFIX:-}
@@ -70,7 +70,7 @@ fi
 
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.9}
-TEMPERATURE=${TEMPERATURE:-0.6}
+TEMPERATURE=${TEMPERATURE:-0.7}
 TOP_P=${TOP_P:-0.95}
 TOP_K=${TOP_K:-20}
 MIN_P=${MIN_P:-0.0}
@@ -191,7 +191,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --top_k "${TOP_K}" \
     --min_p "${MIN_P}" \
     --repetition_penalty "${REPETITION_PENALTY}" \
-    --generation_kwargs "${GENERATION_KWARGS}" \
+    --generation_extra_kwargs_json "${GENERATION_KWARGS}" \
     --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
     --lmbda "${LMBDA}" \
     --lmbda_decay_steps "${LMBDA_DECAY_STEPS}" \
