@@ -35,8 +35,21 @@ MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
 PER_DEVICE_BS=${PER_DEVICE_BS:-2}
 MAX_STEPS=${MAX_STEPS:-300}
+MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
+PROMPT_PREFIX=${PROMPT_PREFIX:-}
+PROMPT_SUFFIX=${PROMPT_SUFFIX:-$'\n\nPlease reason step by step, and put your final answer within \\boxed{}.'}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.60}
+TEMPERATURE=${TEMPERATURE:-0.6}
+TOP_P=${TOP_P:-0.95}
+TOP_K=${TOP_K:-20}
+MIN_P=${MIN_P:-0.0}
+REPETITION_PENALTY=${REPETITION_PENALTY:-1.05}
+PRESENCE_PENALTY=${PRESENCE_PENALTY:-0.2}
+if [ -z "${GENERATION_KWARGS+x}" ]; then
+    GENERATION_KWARGS="{\"presence_penalty\":${PRESENCE_PENALTY}}"
+fi
+MASK_TRUNCATED_COMPLETIONS=${MASK_TRUNCATED_COMPLETIONS:-true}
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
 LMBDA=${LMBDA:-0.5}
 LMBDA_DECAY_STEPS=${LMBDA_DECAY_STEPS:-50}
@@ -52,9 +65,12 @@ ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.0}
 ANSWER_TOKEN_DOWNWEIGHT=${ANSWER_TOKEN_DOWNWEIGHT:-0.2}
 SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
 USE_SIGN_CONSTRAINED_FALLBACK=${USE_SIGN_CONSTRAINED_FALLBACK:-true}
+REQUIRE_EOS_FOR_POSITIVE_REWARD=${REQUIRE_EOS_FOR_POSITIVE_REWARD:-true}
+MASK_TRUNCATED_ADVANTAGES=${MASK_TRUNCATED_ADVANTAGES:-true}
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"q_proj k_proj v_proj o_proj gate_proj up_proj down_proj"}
 LORA_R=${LORA_R:-64}
 LORA_ALPHA=${LORA_ALPHA:-128}
+STRICT_LORA_ONLY=${STRICT_LORA_ONLY:-true}
 
 accelerate launch \
     --config_file accelerate.yaml \
@@ -65,6 +81,8 @@ accelerate launch \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
     --dataset_split train \
+    --prompt_prefix "${PROMPT_PREFIX}" \
+    --prompt_suffix "${PROMPT_SUFFIX}" \
     --learning_rate 1e-6 \
     --max_grad_norm 0.1 \
     --per_device_train_batch_size "${PER_DEVICE_BS}" \
@@ -73,7 +91,7 @@ accelerate launch \
     --run_config "${RUN_CONFIG}" \
     --max_steps "${MAX_STEPS}" \
     --num_generations "${NUM_GENERATIONS}" \
-    --max_completion_length 3072 \
+    --max_completion_length "${MAX_COMPLETION_LENGTH}" \
     --save_steps 25 \
     --logging_steps 2 \
     --attn_implementation sdpa \
@@ -85,12 +103,17 @@ accelerate launch \
     --vllm_gpu_memory_utilization "${VLLM_GPU_MEM_UTIL}" \
     --vllm_tensor_parallel_size 1 \
     --use_peft true \
+    --strict_lora_only "${STRICT_LORA_ONLY}" \
     --lora_r "${LORA_R}" \
     --lora_alpha "${LORA_ALPHA}" \
     --lora_target_modules "${LORA_TARGET_MODULES}" \
-    --temperature 1.0 \
-    --top_p 0.95 \
-    --top_k 20 \
+    --temperature "${TEMPERATURE}" \
+    --top_p "${TOP_P}" \
+    --top_k "${TOP_K}" \
+    --min_p "${MIN_P}" \
+    --repetition_penalty "${REPETITION_PENALTY}" \
+    --generation_kwargs "${GENERATION_KWARGS}" \
+    --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
     --lmbda "${LMBDA}" \
     --lmbda_decay_steps "${LMBDA_DECAY_STEPS}" \
     --fixed_teacher true \
@@ -107,5 +130,7 @@ accelerate launch \
     --adv_clip_high "${ADV_CLIP_HIGH}" \
     --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
     --suppress_gt_shortcut "${SUPPRESS_GT_SHORTCUT}" \
+    --require_eos_for_positive_reward "${REQUIRE_EOS_FOR_POSITIVE_REWARD}" \
+    --mask_truncated_advantages "${MASK_TRUNCATED_ADVANTAGES}" \
     --disable_wandb true \
     --gradient_checkpointing

@@ -22,6 +22,8 @@ class ScriptArguments:
     dataset_split: str = "train"
     dataset_cache_dir: Optional[str] = None
     run_config: str = "rlsd_anchor"
+    prompt_prefix: str = ""
+    prompt_suffix: str = ""
 
     lmbda: float = 0.5
     lmbda_decay_steps: int = 50
@@ -37,6 +39,7 @@ class ScriptArguments:
     torch_dtype: str = "bfloat16"
 
     use_peft: bool = False
+    strict_lora_only: bool = True
     lora_r: int = 64
     lora_alpha: int = 128
     lora_target_modules: str = (
@@ -58,6 +61,8 @@ class ScriptArguments:
     suppress_gt_shortcut: bool = True
     answer_token_downweight: float = 0.2
     reward_binary_threshold: float = 0.5
+    require_eos_for_positive_reward: bool = True
+    mask_truncated_advantages: bool = True
 
 
 def _to_text_completion(completion) -> str:
@@ -86,6 +91,21 @@ def build_peft_config(args: ScriptArguments) -> Optional[LoraConfig]:
         task_type=TaskType.CAUSAL_LM,
         target_modules=target_modules,
     )
+
+
+def apply_prompt_wrapping(prompt: str, prefix: str, suffix: str) -> str:
+    p = prompt if isinstance(prompt, str) else str(prompt)
+    if prefix:
+        p = f"{prefix}{p}"
+    if suffix:
+        p = f"{p}{suffix}"
+    return p
+
+
+def enforce_lora_only_trainable(model) -> None:
+    """Freeze all non-LoRA parameters to guarantee adapter-only updates."""
+    for name, param in model.named_parameters():
+        param.requires_grad_("lora_" in name.lower())
 
 
 class JsonMetricsCallback(TrainerCallback):
@@ -160,6 +180,18 @@ def main():
     setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
 
     train_dataset = load_rlsd_dataset(script_args.dataset_path, split=script_args.dataset_split)
+    if script_args.prompt_prefix or script_args.prompt_suffix:
+        train_dataset = train_dataset.map(
+            lambda row: {
+                **row,
+                "prompt": apply_prompt_wrapping(
+                    row.get("prompt", ""),
+                    script_args.prompt_prefix,
+                    script_args.prompt_suffix,
+                ),
+            },
+            desc="Applying rollout prompt wrapping",
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -195,6 +227,8 @@ def main():
             suppress_gt_shortcut=script_args.suppress_gt_shortcut,
             answer_token_downweight=script_args.answer_token_downweight,
             reward_binary_threshold=script_args.reward_binary_threshold,
+            require_eos_for_positive_reward=script_args.require_eos_for_positive_reward,
+            mask_truncated_advantages=script_args.mask_truncated_advantages,
         )
     trainer = trainer_cls(**trainer_kwargs)
     metrics_jsonl_path = os.path.join(training_args.output_dir, "train_metrics.jsonl")
@@ -211,21 +245,39 @@ def main():
     if training_args.gradient_checkpointing:
         if hasattr(model_for_grad, "enable_input_require_grads"):
             model_for_grad.enable_input_require_grads()
-        if hasattr(model_for_grad, "get_input_embeddings"):
+        if (not script_args.use_peft or not script_args.strict_lora_only) and hasattr(
+            model_for_grad, "get_input_embeddings"
+        ):
             input_embeddings = model_for_grad.get_input_embeddings()
             if input_embeddings is not None and hasattr(input_embeddings, "weight"):
                 input_embeddings.weight.requires_grad_(True)
 
+    if script_args.use_peft and script_args.strict_lora_only:
+        enforce_lora_only_trainable(model_for_grad)
+
     trainable_param_count = sum(p.numel() for p in model_for_grad.parameters() if p.requires_grad)
     total_param_count = sum(p.numel() for p in model_for_grad.parameters())
+    lora_trainable_count = sum(
+        p.numel()
+        for name, p in model_for_grad.named_parameters()
+        if p.requires_grad and "lora_" in name.lower()
+    )
+    non_lora_trainable = [
+        name for name, p in model_for_grad.named_parameters() if p.requires_grad and "lora_" not in name.lower()
+    ]
     print(
         f"[trainable] trainable_params={trainable_param_count}, "
-        f"total_params={total_param_count}, use_peft={script_args.use_peft}"
+        f"lora_trainable_params={lora_trainable_count}, "
+        f"total_params={total_param_count}, "
+        f"use_peft={script_args.use_peft}, strict_lora_only={script_args.strict_lora_only}"
     )
     if trainable_param_count == 0:
         raise RuntimeError(
             "No trainable parameters found. Check --use_peft and --lora_target_modules."
         )
+    if script_args.use_peft and script_args.strict_lora_only and non_lora_trainable:
+        preview = ", ".join(non_lora_trainable[:8])
+        raise RuntimeError(f"Found non-LoRA trainable params under strict_lora_only: {preview}")
 
     trainer.train()
     trainer.save_model(training_args.output_dir)

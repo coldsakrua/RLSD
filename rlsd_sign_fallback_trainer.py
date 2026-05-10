@@ -36,6 +36,8 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         answer_token_downweight: float = 0.2,
         suppress_gt_shortcut: bool = True,
         reward_binary_threshold: float = 0.5,
+        require_eos_for_positive_reward: bool = True,
+        mask_truncated_advantages: bool = True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -50,6 +52,8 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         self.answer_token_downweight = float(answer_token_downweight)
         self.suppress_gt_shortcut = bool(suppress_gt_shortcut)
         self.reward_binary_threshold = float(reward_binary_threshold)
+        self.require_eos_for_positive_reward = bool(require_eos_for_positive_reward)
+        self.mask_truncated_advantages = bool(mask_truncated_advantages)
 
     def _current_fallback_lambda(self, start: float, min_value: float) -> float:
         start = float(start)
@@ -88,14 +92,14 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         target_len: int,
         completion_ids=None,
         completion_mask=None,
+        ended_with_eos=None,
     ) -> torch.Tensor:
         device = self.accelerator.device
         raw_solutions = [x.get("solution", "") for x in inputs]
         solutions = self._expand_column_for_completions(raw_solutions, target_len)
         solution_texts = [s if isinstance(s, str) else str(s) for s in solutions]
 
-        ended_with_eos = None
-        if completion_ids is not None and completion_mask is not None:
+        if ended_with_eos is None and completion_ids is not None and completion_mask is not None:
             ended_with_eos = self._completion_ended_with_eos(completion_ids, completion_mask)
 
         rewards = None
@@ -128,6 +132,9 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         if reward_tensor.numel() != target_len:
             # Safety fallback: when mismatch happens, force neutral reward (all-wrong semantics).
             reward_tensor = torch.zeros(target_len, dtype=torch.float32, device=device)
+        if ended_with_eos is not None and self.require_eos_for_positive_reward:
+            eos_mask = torch.tensor(ended_with_eos, dtype=torch.bool, device=device)
+            reward_tensor = torch.where(eos_mask, reward_tensor, torch.zeros_like(reward_tensor))
         binary = (reward_tensor > self.reward_binary_threshold).float()
         return binary
 
@@ -216,6 +223,7 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
 
         completion_mask = batch["completion_mask"].float()
         completion_ids = batch["completion_ids"]
+        ended_with_eos = self._completion_ended_with_eos(completion_ids, completion_mask)
         sample_count = seq_advantages.numel()
         if sample_count == 0 or sample_count % self.num_generations != 0:
             return batch
@@ -240,6 +248,7 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
             sample_count,
             completion_ids=completion_ids,
             completion_mask=completion_mask,
+            ended_with_eos=ended_with_eos,
         )
         group_rewards = rewards_binary.view(-1, self.num_generations)
         all_correct_group = (group_rewards > 0.5).all(dim=1)
@@ -277,6 +286,13 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
 
         answer_weight_mask = self._build_answer_token_weight_mask(completion_texts, completion_mask)
         token_advantages = token_advantages * answer_weight_mask
+        ended_with_eos_mask = torch.tensor(
+            ended_with_eos, dtype=torch.bool, device=token_advantages.device
+        ).unsqueeze(1)
+        if self.mask_truncated_advantages:
+            token_advantages = torch.where(
+                ended_with_eos_mask, token_advantages, torch.zeros_like(token_advantages)
+            )
         token_advantages = torch.clamp(token_advantages, min=self.adv_clip_low, max=self.adv_clip_high)
         token_advantages = token_advantages * completion_mask
 
@@ -288,6 +304,7 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         self._log_metric("rlsd/group_all_correct_frac", float(all_correct_group.float().mean().item()))
         self._log_metric("rlsd/group_all_wrong_frac", float(all_wrong_group.float().mean().item()))
         self._log_metric("rlsd/group_mixed_frac", float(mixed_group.float().mean().item()))
+        self._log_metric("rlsd/truncated_frac", float((~ended_with_eos_mask.squeeze(1)).float().mean().item()))
         self._log_metric("rlsd/answer_weight_mean", float(answer_weight_mask.mean().item()))
         self._stash_rollout_for_checkpoint(
             inputs,
