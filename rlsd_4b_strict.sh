@@ -33,10 +33,40 @@ mkdir -p "${OUTPUT_DIR}"
 
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
-PER_DEVICE_BS=${PER_DEVICE_BS:-1}
+PER_DEVICE_BS=${PER_DEVICE_BS:-2}
 MAX_STEPS=${MAX_STEPS:-300}
+
+LEARNING_RATE=${LEARNING_RATE:-1e-6}
+WARMUP_RATIO=${WARMUP_RATIO:-0.05}
+WARMUP_STEPS=${WARMUP_STEPS:-0}
+LR_END=${LR_END:-1e-7}
+LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-polynomial}
+if [ -z "${LR_SCHEDULER_KWARGS+x}" ]; then
+    LR_SCHEDULER_KWARGS="{\"lr_end\":${LR_END},\"power\":1.0}"
+fi
+
+TRAIN_LR_ARGS=(--learning_rate "${LEARNING_RATE}" --lr_scheduler_type "${LR_SCHEDULER_TYPE}")
+if [ "${WARMUP_STEPS:-0}" != "0" ]; then
+    TRAIN_LR_ARGS+=(--warmup_steps "${WARMUP_STEPS}")
+elif [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
+    TRAIN_LR_ARGS+=(--warmup_ratio "${WARMUP_RATIO}")
+fi
+if [ -n "${LR_SCHEDULER_KWARGS}" ]; then
+    TRAIN_LR_ARGS+=(--lr_scheduler_kwargs "${LR_SCHEDULER_KWARGS}")
+fi
+
+# Effective warmup steps for logging only (HuggingFace: warmup_steps = floor(max_steps * warmup_ratio)).
+if [ "${WARMUP_STEPS:-0}" != "0" ]; then
+    _WU_DESC="warmup_steps=${WARMUP_STEPS}"
+elif [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
+    _WU_STEPS=$(awk -v ms="${MAX_STEPS}" -v r="${WARMUP_RATIO}" 'BEGIN { printf "%d", int(ms * r) }')
+    _WU_DESC="warmup_ratio=${WARMUP_RATIO} → ~${_WU_STEPS} optimizer steps (max_steps=${MAX_STEPS})"
+else
+    _WU_DESC="no warmup"
+fi
+
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
-VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.6}
+VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.9}
 TRAIN_CUDA_VISIBLE_DEVICES=${TRAIN_CUDA_VISIBLE_DEVICES:-0}
 GEN_CUDA_VISIBLE_DEVICES=${GEN_CUDA_VISIBLE_DEVICES:-1}
 VLLM_SERVER_HOST=${VLLM_SERVER_HOST:-127.0.0.1}
@@ -62,6 +92,11 @@ SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
 ANSWER_TOKEN_DOWNWEIGHT=${ANSWER_TOKEN_DOWNWEIGHT:-0.2}
 REWARD_BINARY_THRESHOLD=${REWARD_BINARY_THRESHOLD:-0.5}
 FALLBACK_TAIL_TOKENS=${FALLBACK_TAIL_TOKENS:-8}
+REWARD_FORMAT_PENALTIES=${REWARD_FORMAT_PENALTIES:-true}
+REWARD_NO_EOS_PENALTY=${REWARD_NO_EOS_PENALTY:-0.15}
+REWARD_MULTI_BOXED_PENALTY=${REWARD_MULTI_BOXED_PENALTY:-0.15}
+REWARD_MIN_CONSECUTIVE_BOXED=${REWARD_MIN_CONSECUTIVE_BOXED:-3}
+SAVE_ROLLOUT_SNAPSHOTS=${SAVE_ROLLOUT_SNAPSHOTS:-true}
 DAPO_EPSILON=${DAPO_EPSILON:-0.1}
 DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.2}
 
@@ -96,7 +131,7 @@ trl vllm-serve \
     > "${VLLM_SERVER_LOG}" 2>&1 &
 VLLM_SERVER_PID=$!
 
-echo "[launch] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES}"
+echo "[launch] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES} lr=${LEARNING_RATE} sched=${LR_SCHEDULER_TYPE} ${_WU_DESC}"
 CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --config_file accelerate.yaml \
     --num_processes 1 \
@@ -107,7 +142,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --dataset_path "${DATASET_PATH}" \
     --dataset_split train \
     --dataset_cache_dir "${DATASET_CACHE_DIR}" \
-    --learning_rate 1e-6 \
+    "${TRAIN_LR_ARGS[@]}" \
     --max_grad_norm 1.0 \
     --per_device_train_batch_size "${PER_DEVICE_BS}" \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
@@ -115,7 +150,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --run_config "${RUN_CONFIG}" \
     --max_steps "${MAX_STEPS}" \
     --num_generations "${NUM_GENERATIONS}" \
-    --max_completion_length 4096 \
+    --max_completion_length 3072 \
     --save_steps 25 \
     --logging_steps 2 \
     --attn_implementation sdpa \
@@ -152,6 +187,11 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
     --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
     --fallback_tail_tokens "${FALLBACK_TAIL_TOKENS}" \
+    --reward_format_penalties "${REWARD_FORMAT_PENALTIES}" \
+    --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
+    --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \
+    --reward_min_consecutive_boxed "${REWARD_MIN_CONSECUTIVE_BOXED}" \
+    --save_rollout_snapshots "${SAVE_ROLLOUT_SNAPSHOTS}" \
     --epsilon "${DAPO_EPSILON}" \
     --dapo_epsilon_high "${DAPO_EPSILON_HIGH}" \
     --disable_wandb true \

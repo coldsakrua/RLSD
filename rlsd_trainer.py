@@ -1,5 +1,5 @@
 from contextlib import nullcontext
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 from trl import GRPOTrainer
@@ -26,6 +26,7 @@ class RLSDTrainer(GRPOTrainer):
         self.fixed_teacher = bool(fixed_teacher)
         self.rollout_filter = rollout_filter
         self.teacher_prompt_template = teacher_prompt_template
+        self._last_rollout_snapshot: Optional[Dict[str, Any]] = None
 
     def _current_lambda(self) -> float:
         if self.lmbda_decay_steps <= 0:
@@ -39,6 +40,96 @@ class RLSDTrainer(GRPOTrainer):
         if hasattr(tokenizer, "tokenizer"):
             tokenizer = tokenizer.tokenizer
         return tokenizer
+
+    def _completion_ended_with_eos(
+        self, completion_ids: torch.Tensor, completion_mask: torch.Tensor
+    ) -> List[bool]:
+        """True if the last non-masked completion token is the tokenizer EOS (natural stop)."""
+        tokenizer = self._get_tokenizer()
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is None:
+            return [True] * int(completion_ids.size(0))
+        out: List[bool] = []
+        for row_ids, row_mask in zip(completion_ids, completion_mask):
+            valid = row_ids[row_mask.bool()]
+            if valid.numel() == 0:
+                out.append(False)
+            else:
+                out.append(int(valid[-1].item()) == int(eos_id))
+        return out
+
+    def _expand_column_for_completions(self, values: Sequence[Any], target_len: int) -> List[Any]:
+        if not values:
+            return [""] * target_len
+        values = list(values)
+        if len(values) == target_len:
+            return values
+        if target_len % len(values) == 0:
+            r = target_len // len(values)
+            return [v for v in values for _ in range(r)]
+        return [values[i % len(values)] for i in range(target_len)]
+
+    def _decode_completion_texts(self, completion_ids: torch.Tensor, completion_mask: torch.Tensor) -> List[str]:
+        tokenizer = self._get_tokenizer()
+        texts: List[str] = []
+        for ids_row, mask_row in zip(completion_ids, completion_mask):
+            valid_ids = ids_row[mask_row.bool()].tolist()
+            texts.append(tokenizer.decode(valid_ids, skip_special_tokens=True))
+        return texts
+
+    def _stash_rollout_for_checkpoint(
+        self,
+        inputs: Sequence[Dict[str, Any]],
+        completion_ids: torch.Tensor,
+        completion_mask: torch.Tensor,
+        *,
+        reward_values: Optional[Sequence[float]] = None,
+        seq_advantages_1d: Optional[torch.Tensor] = None,
+        token_advantages: Optional[torch.Tensor] = None,
+    ) -> None:
+        if not getattr(self.args, "save_rollout_snapshots", True):
+            return
+        if hasattr(self, "accelerator") and not self.accelerator.is_main_process:
+            return
+        sample_count = int(completion_ids.size(0))
+        completions = self._decode_completion_texts(completion_ids, completion_mask)
+        prompt_rows = [self._prompt_to_text(x.get("prompt", "")) for x in inputs]
+        solution_rows = [x.get("solution", "") for x in inputs]
+        prompts_exp = self._expand_column_for_completions(prompt_rows, sample_count)
+        sols_exp = self._expand_column_for_completions(solution_rows, sample_count)
+        ended_eos = self._completion_ended_with_eos(completion_ids, completion_mask)
+
+        grpo_adv_list = None
+        if seq_advantages_1d is not None and seq_advantages_1d.dim() == 1:
+            grpo_adv_list = seq_advantages_1d.detach().cpu().tolist()
+
+        token_adv_mean_list = None
+        if token_advantages is not None and token_advantages.dim() == 2:
+            denom = completion_mask.sum(dim=1).clamp(min=1)
+            token_adv_mean_list = ((token_advantages * completion_mask).sum(dim=1) / denom).detach().cpu().tolist()
+
+        samples: List[Dict[str, Any]] = []
+        for i in range(sample_count):
+            item: Dict[str, Any] = {
+                "prompt": prompts_exp[i] if i < len(prompts_exp) else "",
+                "solution": str(sols_exp[i]) if i < len(sols_exp) else "",
+                "completion": completions[i],
+                "ended_with_eos": ended_eos[i],
+            }
+            if reward_values is not None and i < len(reward_values):
+                item["reward"] = float(reward_values[i])
+            if grpo_adv_list is not None and i < len(grpo_adv_list):
+                item["grpo_advantage"] = float(grpo_adv_list[i])
+            if token_adv_mean_list is not None and i < len(token_adv_mean_list):
+                item["token_advantage_mean"] = float(token_adv_mean_list[i])
+            samples.append(item)
+
+        self._last_rollout_snapshot = {
+            "rollout_global_step": int(getattr(self.state, "global_step", -1)),
+            "epoch": float(getattr(self.state, "epoch", 0.0) or 0.0),
+            "num_generations": int(getattr(self, "num_generations", 1)),
+            "samples": samples,
+        }
 
     def _prompt_to_text(self, prompt: Any) -> str:
         if isinstance(prompt, str):
@@ -187,6 +278,14 @@ class RLSDTrainer(GRPOTrainer):
         batch["advantages"] = token_advantages
         self._log_metric("rlsd_lambda", lam)
         self._log_metric("rlsd_w_mean", float(token_weight.mean().item()))
+        self._stash_rollout_for_checkpoint(
+            inputs,
+            completion_ids,
+            completion_mask,
+            reward_values=None,
+            seq_advantages_1d=seq_advantages,
+            token_advantages=token_advantages,
+        )
         return batch
 
     def _compute_loss(self, model, inputs):

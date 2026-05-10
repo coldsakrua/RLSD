@@ -10,6 +10,7 @@ from trl import GRPOConfig
 
 from data_utils import load_rlsd_dataset
 from reward_fn import verifiable_math_reward
+from rlsd_rollout_snapshot import SaveRolloutSnapshotCallback
 from rlsd_trainer import RLSDTrainer
 from rlsd_sign_fallback_trainer import RLSDSignFallbackTrainer
 
@@ -43,6 +44,7 @@ class ScriptArguments:
     )
 
     disable_wandb: bool = False
+    save_rollout_snapshots: bool = True
 
     use_sign_constrained_fallback: bool = True
     lambda_plus: float = 0.05
@@ -155,6 +157,8 @@ def main():
             raise ValueError("When --max_length is set, --max_completion_length must also be set.")
         training_args.max_prompt_length = max(32, script_args.max_length - training_args.max_completion_length)
 
+    setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
+
     train_dataset = load_rlsd_dataset(script_args.dataset_path, split=script_args.dataset_split)
 
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path, trust_remote_code=True)
@@ -196,6 +200,9 @@ def main():
     metrics_jsonl_path = os.path.join(training_args.output_dir, "train_metrics.jsonl")
     trainer.add_callback(JsonMetricsCallback(metrics_jsonl_path))
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
+    if script_args.save_rollout_snapshots:
+        trainer.add_callback(SaveRolloutSnapshotCallback(trainer))
+        print(f"[rollout_snapshot] enabled -> {training_args.output_dir}/rollout_snapshot_step_*.json on each save")
 
     # For PEFT + gradient checkpointing, force a valid gradient path from input embeddings.
     model_for_grad = trainer.model

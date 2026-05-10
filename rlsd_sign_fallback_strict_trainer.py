@@ -1,11 +1,11 @@
 import re
 from contextlib import nullcontext
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from trl import GRPOTrainer
 
-from reward_fn import verifiable_math_reward
+from reward_fn import verifiable_math_reward, verifiable_math_reward_with_format_penalties
 from rlsd_trainer import RLSDTrainer
 
 
@@ -81,20 +81,47 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
             texts.append(tokenizer.decode(valid_ids, skip_special_tokens=True))
         return texts
 
-    def _compute_binary_rewards(self, inputs, completions: List[str], sample_count: int) -> torch.Tensor:
+    def _compute_binary_rewards(
+        self,
+        inputs,
+        completions: List[str],
+        sample_count: int,
+        completion_ids: Optional[torch.Tensor] = None,
+        completion_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         device = self.accelerator.device
         solutions = self._expand_to_samples([x.get("solution", "") for x in inputs], sample_count)
         solutions = [s if isinstance(s, str) else str(s) for s in solutions]
+
+        ended_with_eos: Optional[List[bool]] = None
+        if completion_ids is not None and completion_mask is not None:
+            ended_with_eos = self._completion_ended_with_eos(completion_ids, completion_mask)
 
         rewards = None
         reward_func = self.reward_funcs[0] if getattr(self, "reward_funcs", None) else None
         if callable(reward_func):
             try:
+                if ended_with_eos is not None:
+                    rewards = reward_func(
+                        completions=completions,
+                        solution=solutions,
+                        ended_with_eos=ended_with_eos,
+                    )
+                else:
+                    rewards = reward_func(completions=completions, solution=solutions)
+            except TypeError:
                 rewards = reward_func(completions=completions, solution=solutions)
             except Exception:
                 rewards = None
         if rewards is None:
-            rewards = verifiable_math_reward(completions, solutions)
+            if ended_with_eos is not None:
+                rewards = verifiable_math_reward_with_format_penalties(
+                    completions,
+                    solutions,
+                    ended_with_eos=ended_with_eos,
+                )
+            else:
+                rewards = verifiable_math_reward(completions, solutions)
 
         reward_t = torch.tensor(rewards, dtype=torch.float32, device=device)
         if reward_t.numel() != sample_count:
@@ -241,7 +268,13 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         clip_high = 1.0 + self.jsd_token_clip
 
         completion_texts = self._decode_completions(completion_ids, completion_mask)
-        rewards_binary = self._compute_binary_rewards(inputs, completion_texts, sample_count)
+        rewards_binary = self._compute_binary_rewards(
+            inputs,
+            completion_texts,
+            sample_count,
+            completion_ids=completion_ids,
+            completion_mask=completion_mask,
+        )
         grouped = rewards_binary.view(-1, self.num_generations)
         all_correct_group = (grouped > 0.5).all(dim=1)
         all_wrong_group = (grouped < 0.5).all(dim=1)
@@ -330,4 +363,12 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         self._log_metric("strict/completion_count_mixed", float(completion_count_mixed))
         self._log_metric("strict/answer_weight_mean", float(answer_weights.mean().item()))
         self._log_metric("strict/adv_abs_mean", float((token_adv.abs() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()))
+        self._stash_rollout_for_checkpoint(
+            inputs,
+            completion_ids,
+            completion_mask,
+            reward_values=rewards_binary.detach().cpu().tolist(),
+            seq_advantages_1d=seq_advantages,
+            token_advantages=token_adv,
+        )
         return batch

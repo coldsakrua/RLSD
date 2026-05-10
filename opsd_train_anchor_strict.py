@@ -9,7 +9,8 @@ from transformers import AutoTokenizer, HfArgumentParser, TrainerCallback
 from trl import GRPOConfig
 
 from data_utils import load_rlsd_dataset
-from reward_fn import verifiable_math_reward
+from reward_fn import verifiable_math_reward, verifiable_math_reward_with_format_penalties
+from rlsd_rollout_snapshot import SaveRolloutSnapshotCallback
 from rlsd_sign_fallback_strict_trainer import RLSDSignFallbackStrictTrainer
 
 
@@ -44,6 +45,11 @@ class ScriptArguments:
     answer_token_downweight: float = 0.2
     reward_binary_threshold: float = 0.5
     fallback_tail_tokens: int = 8
+    # Penalties applied on top of correctness (see reward_fn.verifiable_math_reward_with_format_penalties).
+    reward_format_penalties: bool = True
+    reward_no_eos_penalty: float = 0.15
+    reward_multi_boxed_penalty: float = 0.15
+    reward_min_consecutive_boxed: int = 3
     # DAPO-style asymmetric clipping for positive-advantage samples:
     # upper clip bound becomes (1 + epsilon_high) for adv>0.
     dapo_epsilon_high: Optional[float] = None
@@ -60,6 +66,8 @@ class ScriptArguments:
     )
 
     disable_wandb: bool = False
+    # When true, each checkpoint save also writes rollout_snapshot_step_*.json (last mini-batch rollout).
+    save_rollout_snapshots: bool = True
 
 
 def _to_text_completion(completion) -> str:
@@ -71,9 +79,23 @@ def _to_text_completion(completion) -> str:
     return str(completion)
 
 
-def reward_fn(completions, solution, **kwargs):
-    text_completions = [_to_text_completion(c) for c in completions]
-    return verifiable_math_reward(text_completions, solution)
+def build_reward_fn(args: ScriptArguments):
+    """Closure so format-penalty weights live in ScriptArguments."""
+
+    def reward_fn(completions, solution, ended_with_eos=None, **kwargs):
+        text_completions = [_to_text_completion(c) for c in completions]
+        if args.reward_format_penalties:
+            return verifiable_math_reward_with_format_penalties(
+                text_completions,
+                solution,
+                ended_with_eos=ended_with_eos,
+                no_eos_penalty=args.reward_no_eos_penalty,
+                multi_boxed_penalty=args.reward_multi_boxed_penalty,
+                min_consecutive_boxed=args.reward_min_consecutive_boxed,
+            )
+        return verifiable_math_reward(text_completions, solution)
+
+    return reward_fn
 
 
 def build_peft_config(args: ScriptArguments) -> Optional[LoraConfig]:
@@ -140,6 +162,8 @@ def main():
             raise ValueError("When --max_length is set, --max_completion_length must also be set.")
         training_args.max_prompt_length = max(32, script_args.max_length - training_args.max_completion_length)
 
+    setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
+
     train_dataset = load_rlsd_dataset(script_args.dataset_path, split=script_args.dataset_split)
 
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path, trust_remote_code=True)
@@ -150,7 +174,7 @@ def main():
 
     trainer = RLSDSignFallbackStrictTrainer(
         model=script_args.model_name_or_path,
-        reward_funcs=reward_fn,
+        reward_funcs=build_reward_fn(script_args),
         args=training_args,
         train_dataset=train_dataset,
         processing_class=tokenizer,
@@ -178,6 +202,9 @@ def main():
     metrics_jsonl_path = os.path.join(training_args.output_dir, "train_metrics.jsonl")
     trainer.add_callback(JsonMetricsCallback(metrics_jsonl_path))
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
+    if script_args.save_rollout_snapshots:
+        trainer.add_callback(SaveRolloutSnapshotCallback(trainer))
+        print(f"[rollout_snapshot] enabled -> {training_args.output_dir}/rollout_snapshot_step_*.json on each save")
 
     model_for_grad = trainer.model
     if hasattr(trainer, "accelerator"):

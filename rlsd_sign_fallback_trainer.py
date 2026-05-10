@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Sequence
 
 import torch
 
-from reward_fn import verifiable_math_reward
+from reward_fn import verifiable_math_reward, verifiable_math_reward_with_format_penalties
 from rlsd_trainer import RLSDTrainer
 
 
@@ -81,21 +81,48 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
             return [v for v in values for _ in range(repeat)]
         return [values[i % len(values)] for i in range(target_len)]
 
-    def _compute_binary_rewards(self, inputs, completion_texts: List[str], target_len: int) -> torch.Tensor:
+    def _compute_binary_rewards(
+        self,
+        inputs,
+        completion_texts: List[str],
+        target_len: int,
+        completion_ids=None,
+        completion_mask=None,
+    ) -> torch.Tensor:
         device = self.accelerator.device
         raw_solutions = [x.get("solution", "") for x in inputs]
         solutions = self._expand_column_for_completions(raw_solutions, target_len)
         solution_texts = [s if isinstance(s, str) else str(s) for s in solutions]
 
+        ended_with_eos = None
+        if completion_ids is not None and completion_mask is not None:
+            ended_with_eos = self._completion_ended_with_eos(completion_ids, completion_mask)
+
         rewards = None
         reward_func = self.reward_funcs[0] if getattr(self, "reward_funcs", None) else None
         if callable(reward_func):
             try:
+                if ended_with_eos is not None:
+                    rewards = reward_func(
+                        completions=completion_texts,
+                        solution=solution_texts,
+                        ended_with_eos=ended_with_eos,
+                    )
+                else:
+                    rewards = reward_func(completions=completion_texts, solution=solution_texts)
+            except TypeError:
                 rewards = reward_func(completions=completion_texts, solution=solution_texts)
             except Exception:
                 rewards = None
         if rewards is None:
-            rewards = verifiable_math_reward(completion_texts, solution_texts)
+            if ended_with_eos is not None:
+                rewards = verifiable_math_reward_with_format_penalties(
+                    completion_texts,
+                    solution_texts,
+                    ended_with_eos=ended_with_eos,
+                )
+            else:
+                rewards = verifiable_math_reward(completion_texts, solution_texts)
 
         reward_tensor = torch.tensor(rewards, dtype=torch.float32, device=device)
         if reward_tensor.numel() != target_len:
@@ -207,7 +234,13 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         clip_high = 1.0 + self.jsd_token_clip
 
         completion_texts = self._decode_completion_texts(completion_ids, completion_mask)
-        rewards_binary = self._compute_binary_rewards(inputs, completion_texts, sample_count)
+        rewards_binary = self._compute_binary_rewards(
+            inputs,
+            completion_texts,
+            sample_count,
+            completion_ids=completion_ids,
+            completion_mask=completion_mask,
+        )
         group_rewards = rewards_binary.view(-1, self.num_generations)
         all_correct_group = (group_rewards > 0.5).all(dim=1)
         all_wrong_group = (group_rewards < 0.5).all(dim=1)
@@ -256,4 +289,12 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         self._log_metric("rlsd/group_all_wrong_frac", float(all_wrong_group.float().mean().item()))
         self._log_metric("rlsd/group_mixed_frac", float(mixed_group.float().mean().item()))
         self._log_metric("rlsd/answer_weight_mean", float(answer_weight_mask.mean().item()))
+        self._stash_rollout_for_checkpoint(
+            inputs,
+            completion_ids,
+            completion_mask,
+            reward_values=rewards_binary.detach().cpu().tolist(),
+            seq_advantages_1d=seq_advantages,
+            token_advantages=token_advantages,
+        )
         return batch
