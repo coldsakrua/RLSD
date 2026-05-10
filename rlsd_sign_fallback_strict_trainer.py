@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 from trl import GRPOTrainer
 
-from reward_fn import verifiable_math_reward, verifiable_math_reward_with_format_penalties
+from reward_fn import verifiable_math_reward
 from rlsd_trainer import RLSDTrainer
 
 
@@ -39,8 +39,6 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         suppress_gt_shortcut: bool = True,
         reward_binary_threshold: float = 0.5,
         fallback_tail_tokens: int = 8,
-        require_eos_for_positive_reward: bool = True,
-        mask_truncated_advantages: bool = True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -56,8 +54,6 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         self.suppress_gt_shortcut = bool(suppress_gt_shortcut)
         self.reward_binary_threshold = float(reward_binary_threshold)
         self.fallback_tail_tokens = int(fallback_tail_tokens)
-        self.require_eos_for_positive_reward = bool(require_eos_for_positive_reward)
-        self.mask_truncated_advantages = bool(mask_truncated_advantages)
 
     def _current_fallback_lambda(self, start: float, min_value: float) -> float:
         if self.fallback_decay_steps <= 0:
@@ -92,47 +88,16 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         sample_count: int,
         completion_ids: Optional[torch.Tensor] = None,
         completion_mask: Optional[torch.Tensor] = None,
-        ended_with_eos: Optional[List[bool]] = None,
     ) -> torch.Tensor:
         device = self.accelerator.device
         solutions = self._expand_to_samples([x.get("solution", "") for x in inputs], sample_count)
         solutions = [s if isinstance(s, str) else str(s) for s in solutions]
-
-        if ended_with_eos is None and completion_ids is not None and completion_mask is not None:
-            ended_with_eos = self._completion_ended_with_eos(completion_ids, completion_mask)
-
-        rewards = None
-        reward_func = self.reward_funcs[0] if getattr(self, "reward_funcs", None) else None
-        if callable(reward_func):
-            try:
-                if ended_with_eos is not None:
-                    rewards = reward_func(
-                        completions=completions,
-                        solution=solutions,
-                        ended_with_eos=ended_with_eos,
-                    )
-                else:
-                    rewards = reward_func(completions=completions, solution=solutions)
-            except TypeError:
-                rewards = reward_func(completions=completions, solution=solutions)
-            except Exception:
-                rewards = None
-        if rewards is None:
-            if ended_with_eos is not None:
-                rewards = verifiable_math_reward_with_format_penalties(
-                    completions,
-                    solutions,
-                    ended_with_eos=ended_with_eos,
-                )
-            else:
-                rewards = verifiable_math_reward(completions, solutions)
+        # Keep "count as correct" logic based on pure correctness (no format penalties).
+        rewards = verifiable_math_reward(completions, solutions)
 
         reward_t = torch.tensor(rewards, dtype=torch.float32, device=device)
         if reward_t.numel() != sample_count:
             reward_t = torch.zeros(sample_count, dtype=torch.float32, device=device)
-        if ended_with_eos is not None and self.require_eos_for_positive_reward:
-            eos_mask = torch.tensor(ended_with_eos, dtype=torch.bool, device=device)
-            reward_t = torch.where(eos_mask, reward_t, torch.zeros_like(reward_t))
         return (reward_t > self.reward_binary_threshold).float()
 
     def _rowwise_minmax_01(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -257,7 +222,6 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
 
         completion_mask = batch["completion_mask"].float()
         completion_ids = batch["completion_ids"]
-        ended_with_eos = self._completion_ended_with_eos(completion_ids, completion_mask)
         sample_count = seq_advantages.numel()
         if sample_count == 0 or sample_count % self.num_generations != 0:
             return batch
@@ -282,7 +246,6 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
             sample_count,
             completion_ids=completion_ids,
             completion_mask=completion_mask,
-            ended_with_eos=ended_with_eos,
         )
         grouped = rewards_binary.view(-1, self.num_generations)
         all_correct_group = (grouped > 0.5).all(dim=1)
@@ -325,11 +288,6 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
 
         answer_weights = self._answer_weight_mask(completion_texts, completion_mask)
         token_adv = token_adv * answer_weights
-        ended_with_eos_mask = torch.tensor(
-            ended_with_eos, dtype=torch.bool, device=token_adv.device
-        ).unsqueeze(1)
-        if self.mask_truncated_advantages:
-            token_adv = torch.where(ended_with_eos_mask, token_adv, torch.zeros_like(token_adv))
         token_adv = torch.clamp(token_adv, min=self.adv_clip_low, max=self.adv_clip_high)
         token_adv = token_adv * completion_mask
 
@@ -375,10 +333,6 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         self._log_metric("strict/completion_count_all_correct", float(completion_count_all_correct))
         self._log_metric("strict/completion_count_all_wrong", float(completion_count_all_wrong))
         self._log_metric("strict/completion_count_mixed", float(completion_count_mixed))
-        self._log_metric(
-            "strict/truncated_frac",
-            float((~ended_with_eos_mask.squeeze(1)).float().mean().item()),
-        )
         self._log_metric("strict/answer_weight_mean", float(answer_weights.mean().item()))
         self._log_metric("strict/adv_abs_mean", float((token_adv.abs() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()))
         self._stash_rollout_for_checkpoint(

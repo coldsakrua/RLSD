@@ -47,13 +47,11 @@ class ScriptArguments:
     answer_token_downweight: float = 0.2
     reward_binary_threshold: float = 0.5
     fallback_tail_tokens: int = 8
-    require_eos_for_positive_reward: bool = True
-    mask_truncated_advantages: bool = True
     # Penalties applied on top of correctness (see reward_fn.verifiable_math_reward_with_format_penalties).
     reward_format_penalties: bool = True
     reward_no_eos_penalty: float = 0.15
     reward_multi_boxed_penalty: float = 0.15
-    reward_min_consecutive_boxed: int = 3
+    reward_min_consecutive_boxed: int = 2
     # DAPO-style asymmetric clipping for positive-advantage samples:
     # upper clip bound becomes (1 + epsilon_high) for adv>0.
     dapo_epsilon_high: Optional[float] = None
@@ -241,8 +239,6 @@ def main():
         answer_token_downweight=script_args.answer_token_downweight,
         reward_binary_threshold=script_args.reward_binary_threshold,
         fallback_tail_tokens=script_args.fallback_tail_tokens,
-        require_eos_for_positive_reward=script_args.require_eos_for_positive_reward,
-        mask_truncated_advantages=script_args.mask_truncated_advantages,
     )
 
     metrics_jsonl_path = os.path.join(training_args.output_dir, "train_metrics.jsonl")

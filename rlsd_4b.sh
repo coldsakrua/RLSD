@@ -65,8 +65,6 @@ ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.0}
 ANSWER_TOKEN_DOWNWEIGHT=${ANSWER_TOKEN_DOWNWEIGHT:-0.2}
 SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
 USE_SIGN_CONSTRAINED_FALLBACK=${USE_SIGN_CONSTRAINED_FALLBACK:-true}
-REQUIRE_EOS_FOR_POSITIVE_REWARD=${REQUIRE_EOS_FOR_POSITIVE_REWARD:-true}
-MASK_TRUNCATED_ADVANTAGES=${MASK_TRUNCATED_ADVANTAGES:-true}
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"q_proj k_proj v_proj o_proj gate_proj up_proj down_proj"}
 LORA_R=${LORA_R:-64}
 LORA_ALPHA=${LORA_ALPHA:-128}
@@ -130,7 +128,5 @@ accelerate launch \
     --adv_clip_high "${ADV_CLIP_HIGH}" \
     --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
     --suppress_gt_shortcut "${SUPPRESS_GT_SHORTCUT}" \
-    --require_eos_for_positive_reward "${REQUIRE_EOS_FOR_POSITIVE_REWARD}" \
-    --mask_truncated_advantages "${MASK_TRUNCATED_ADVANTAGES}" \
     --disable_wandb true \
     --gradient_checkpointing

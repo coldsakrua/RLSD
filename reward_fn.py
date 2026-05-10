@@ -17,6 +17,30 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", "", text).strip().lower()
 
 
+def _longest_consecutive_boxed_run(text: str) -> tuple[int, int]:
+    """
+    Return (start_idx, run_len) over boxed matches where neighbors are separated only by whitespace.
+    start_idx is the index in the boxed-match list (not character index).
+    """
+    matches = list(_BOXED_RE.finditer(text or ""))
+    if not matches:
+        return -1, 0
+
+    best_start, best_len = 0, 1
+    cur_start, cur_len = 0, 1
+    for i in range(1, len(matches)):
+        between = text[matches[i - 1].end() : matches[i].start()]
+        if between.strip() == "":
+            cur_len += 1
+        else:
+            if cur_len > best_len:
+                best_start, best_len = cur_start, cur_len
+            cur_start, cur_len = i, 1
+    if cur_len > best_len:
+        best_start, best_len = cur_start, cur_len
+    return best_start, best_len
+
+
 def _extract_final_answer(text: str) -> str:
     if not text:
         return ""
@@ -25,9 +49,14 @@ def _extract_final_answer(text: str) -> str:
     if tag_matches:
         return tag_matches[-1].strip()
 
-    boxed_matches = _BOXED_RE.findall(text)
-    if boxed_matches:
-        return boxed_matches[-1].strip()
+    boxed_match_objs = list(_BOXED_RE.finditer(text))
+    if boxed_match_objs:
+        run_start, run_len = _longest_consecutive_boxed_run(text)
+        # If there is a consecutive boxed run (e.g. boxed spam), score by the FIRST boxed answer.
+        if run_start >= 0 and run_len >= 2:
+            return boxed_match_objs[run_start].group(1).strip()
+        # Otherwise keep original "final boxed answer" behavior.
+        return boxed_match_objs[-1].group(1).strip()
 
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
     if not lines:
@@ -60,20 +89,7 @@ def _math_correctness_reward(completion: str, gt: str) -> float:
 
 def _max_consecutive_boxed_run(text: str) -> int:
     """Longest run of \\boxed{...} tokens that are only separated by whitespace."""
-    if not text:
-        return 0
-    last_end: Optional[int] = None
-    max_run = 0
-    cur = 0
-    for m in _BOXED_RE.finditer(text):
-        if last_end is None:
-            cur = 1
-        else:
-            between = text[last_end : m.start()]
-            cur = cur + 1 if between.strip() == "" else 1
-        max_run = max(max_run, cur)
-        last_end = m.end()
-    return max_run
+    return _longest_consecutive_boxed_run(text)[1]
 
 
 def verifiable_math_reward(completions: Iterable[str], solution: Iterable[str], **kwargs) -> List[float]:
@@ -90,7 +106,7 @@ def verifiable_math_reward_with_format_penalties(
     ended_with_eos: Optional[Sequence[bool]] = None,
     no_eos_penalty: float = 0.15,
     multi_boxed_penalty: float = 0.15,
-    min_consecutive_boxed: int = 3,
+    min_consecutive_boxed: int = 2,
 ) -> List[float]:
     """
     Correctness reward minus optional penalties:
@@ -110,7 +126,10 @@ def verifiable_math_reward_with_format_penalties(
         penalty = 0.0
         if eos_list is not None and i < len(eos_list) and not eos_list[i]:
             penalty += float(no_eos_penalty)
-        if _max_consecutive_boxed_run(c) >= int(min_consecutive_boxed):
-            penalty += float(multi_boxed_penalty)
+        run_len = _max_consecutive_boxed_run(c)
+        if run_len >= int(min_consecutive_boxed):
+            # Only the first boxed answer is credited; each additional consecutive box is penalized.
+            extra_boxes = max(0, run_len - 1)
+            penalty += float(multi_boxed_penalty) * float(extra_boxes)
         rewards.append(max(0.0, min(1.0, base - penalty)))
     return rewards

@@ -61,8 +61,6 @@ class ScriptArguments:
     suppress_gt_shortcut: bool = True
     answer_token_downweight: float = 0.2
     reward_binary_threshold: float = 0.5
-    require_eos_for_positive_reward: bool = True
-    mask_truncated_advantages: bool = True
 
 
 def _to_text_completion(completion) -> str:
@@ -227,8 +225,6 @@ def main():
             suppress_gt_shortcut=script_args.suppress_gt_shortcut,
             answer_token_downweight=script_args.answer_token_downweight,
             reward_binary_threshold=script_args.reward_binary_threshold,
-            require_eos_for_positive_reward=script_args.require_eos_for_positive_reward,
-            mask_truncated_advantages=script_args.mask_truncated_advantages,
         )
     trainer = trainer_cls(**trainer_kwargs)
     metrics_jsonl_path = os.path.join(training_args.output_dir, "train_metrics.jsonl")
