@@ -48,6 +48,7 @@ class ScriptArguments:
 
     disable_wandb: bool = False
     save_rollout_snapshots: bool = True
+    rollout_snapshot_interval_steps: int = 2
 
     use_sign_constrained_fallback: bool = True
     lambda_plus: float = 0.05
@@ -176,6 +177,11 @@ def main():
         training_args.max_prompt_length = max(32, script_args.max_length - training_args.max_completion_length)
 
     setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
+    setattr(
+        training_args,
+        "rollout_snapshot_interval_steps",
+        int(script_args.rollout_snapshot_interval_steps),
+    )
 
     train_dataset = load_rlsd_dataset(script_args.dataset_path, split=script_args.dataset_split)
     if script_args.prompt_prefix or script_args.prompt_suffix:
@@ -232,7 +238,12 @@ def main():
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
     if script_args.save_rollout_snapshots:
         trainer.add_callback(SaveRolloutSnapshotCallback(trainer))
-        print(f"[rollout_snapshot] enabled -> {training_args.output_dir}/rollout_snapshot_step_*.json on each save")
+        _iv = int(getattr(training_args, "rollout_snapshot_interval_steps", 0) or 0)
+        _extra = f" + every {_iv} steps" if _iv > 0 else ""
+        print(
+            f"[rollout_snapshot] enabled -> {training_args.output_dir}/rollout_snapshot_step_*.json "
+            f"on checkpoint save{_extra}"
+        )
 
     # For PEFT + gradient checkpointing, force a valid gradient path from input embeddings.
     model_for_grad = trainer.model

@@ -213,6 +213,11 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
             completion_ids=completion_ids,
             completion_mask=completion_mask,
         )
+        if rewards_binary.numel() > 0:
+            acc = float(self.accelerator.gather_for_metrics(rewards_binary.float()).mean().item())
+        else:
+            acc = 0.0
+        self._log_metric("acc", acc)
         group_rewards = rewards_binary.view(-1, self.num_generations)
         all_correct_group = (group_rewards > 0.5).all(dim=1)
         all_wrong_group = (group_rewards < 0.5).all(dim=1)

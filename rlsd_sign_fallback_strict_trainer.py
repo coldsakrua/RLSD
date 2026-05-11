@@ -73,14 +73,6 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
             return [v for v in values for _ in range(r)]
         return [values[i % len(values)] for i in range(target_len)]
 
-    def _decode_completions(self, completion_ids: torch.Tensor, completion_mask: torch.Tensor) -> List[str]:
-        tokenizer = self._get_tokenizer()
-        texts: List[str] = []
-        for ids_row, mask_row in zip(completion_ids, completion_mask):
-            valid_ids = ids_row[mask_row.bool()].tolist()
-            texts.append(tokenizer.decode(valid_ids, skip_special_tokens=True))
-        return texts
-
     def _compute_binary_rewards(
         self,
         inputs,
@@ -130,7 +122,13 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
             spans.append((tail.start(1), tail.end(1)))
         return spans
 
-    def _answer_weight_mask(self, completion_texts: List[str], completion_mask: torch.Tensor) -> torch.Tensor:
+    def _answer_weight_mask(
+        self,
+        completion_texts: List[str],
+        completion_mask: torch.Tensor,
+        *,
+        decode_length_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         n, max_len = completion_mask.shape
         device = completion_mask.device
         weights = torch.ones((n, max_len), dtype=torch.float32, device=device)
@@ -143,7 +141,8 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         use_offset = getattr(tokenizer, "is_fast", False)
 
         for i, text in enumerate(completion_texts):
-            valid_len = int(completion_mask[i].sum().item())
+            len_src = decode_length_mask if decode_length_mask is not None else completion_mask
+            valid_len = int(len_src[i].sum().item())
             if valid_len <= 0:
                 continue
 
@@ -239,7 +238,8 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         clip_low = 1.0 - self.jsd_token_clip
         clip_high = 1.0 + self.jsd_token_clip
 
-        completion_texts = self._decode_completions(completion_ids, completion_mask)
+        snap_mask = self._completion_mask_through_first_eos(completion_ids)
+        completion_texts = self._decode_completion_texts(completion_ids, snap_mask)
         rewards_binary = self._compute_binary_rewards(
             inputs,
             completion_texts,
@@ -247,6 +247,11 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
             completion_ids=completion_ids,
             completion_mask=completion_mask,
         )
+        if rewards_binary.numel() > 0:
+            acc = float(self.accelerator.gather_for_metrics(rewards_binary.float()).mean().item())
+        else:
+            acc = 0.0
+        self._log_metric("acc", acc)
         grouped = rewards_binary.view(-1, self.num_generations)
         all_correct_group = (grouped > 0.5).all(dim=1)
         all_wrong_group = (grouped < 0.5).all(dim=1)
@@ -286,7 +291,9 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         token_adv = torch.where(all_correct, plus_adv, token_adv)
         token_adv = torch.where(all_wrong, minus_adv, token_adv)
 
-        answer_weights = self._answer_weight_mask(completion_texts, completion_mask)
+        answer_weights = self._answer_weight_mask(
+            completion_texts, completion_mask, decode_length_mask=snap_mask
+        )
         token_adv = token_adv * answer_weights
         token_adv = torch.clamp(token_adv, min=self.adv_clip_low, max=self.adv_clip_high)
         token_adv = token_adv * completion_mask

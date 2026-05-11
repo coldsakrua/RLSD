@@ -4,6 +4,9 @@ from typing import Any, Dict, List, Optional, Sequence
 import torch
 from trl import GRPOTrainer
 
+from data_utils import apply_qwen3_rollout_chat_template
+from reward_fn import extract_math_reward_answer
+
 
 class RLSDTrainer(GRPOTrainer):
     def __init__(
@@ -74,8 +77,66 @@ class RLSDTrainer(GRPOTrainer):
         texts: List[str] = []
         for ids_row, mask_row in zip(completion_ids, completion_mask):
             valid_ids = ids_row[mask_row.bool()].tolist()
-            texts.append(tokenizer.decode(valid_ids, skip_special_tokens=True))
+            texts.append(self._decode_non_thinking_content(valid_ids, tokenizer))
         return texts
+
+    def _end_think_token_id(self, tokenizer) -> Optional[int]:
+        """Best-effort lookup for ``</think>`` token id (Qwen-style thinking template)."""
+        try:
+            tok_id = tokenizer.convert_tokens_to_ids("</think>")
+        except Exception:
+            return None
+        if tok_id is None:
+            return None
+        try:
+            tok_id = int(tok_id)
+        except Exception:
+            return None
+        if tok_id < 0:
+            return None
+        return tok_id
+
+    def _decode_non_thinking_content(self, valid_ids: List[int], tokenizer) -> str:
+        """
+        Match official Qwen-style parsing: if ``</think>`` appears, keep only tokens after its
+        last occurrence; otherwise keep full decoded text.
+        """
+        if not valid_ids:
+            return ""
+
+        end_think_id = self._end_think_token_id(tokenizer)
+        if end_think_id is not None:
+            for i in range(len(valid_ids) - 1, -1, -1):
+                if int(valid_ids[i]) == end_think_id:
+                    tail = valid_ids[i + 1 :]
+                    return tokenizer.decode(tail, skip_special_tokens=True).strip("\n")
+
+        text = tokenizer.decode(valid_ids, skip_special_tokens=True)
+        if "</think>" in text:
+            return text.rsplit("</think>", 1)[-1].strip("\n")
+        return text
+
+    def _completion_mask_through_first_eos(self, completion_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Mask through the first EOS (inclusive), else keep all completion positions.
+        Matches TRL pre-``mask_truncated_completions`` semantics so snapshots/logs see the full rollout string.
+        """
+        tokenizer = self._get_tokenizer()
+        device = completion_ids.device
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is None:
+            return torch.ones_like(completion_ids, dtype=torch.long)
+        is_eos = completion_ids == int(eos_id)
+        seq_len = int(is_eos.size(1))
+        eos_idx = torch.full((is_eos.size(0),), seq_len, dtype=torch.long, device=device)
+        any_eos = is_eos.any(dim=1)
+        eos_idx[any_eos] = is_eos.int().argmax(dim=1)[any_eos]
+        seq = torch.arange(seq_len, device=device).unsqueeze(0).expand(is_eos.size(0), -1)
+        return (seq <= eos_idx.unsqueeze(1)).long()
+
+    def _decode_completion_texts_snapshot(self, completion_ids: torch.Tensor) -> List[str]:
+        snap = self._completion_mask_through_first_eos(completion_ids)
+        return self._decode_completion_texts(completion_ids, snap)
 
     def _stash_rollout_for_checkpoint(
         self,
@@ -92,12 +153,13 @@ class RLSDTrainer(GRPOTrainer):
         if hasattr(self, "accelerator") and not self.accelerator.is_main_process:
             return
         sample_count = int(completion_ids.size(0))
-        completions = self._decode_completion_texts(completion_ids, completion_mask)
+        snap_mask = self._completion_mask_through_first_eos(completion_ids)
+        completions = self._decode_completion_texts(completion_ids, snap_mask)
         prompt_rows = [self._prompt_to_text(x.get("prompt", "")) for x in inputs]
         solution_rows = [x.get("solution", "") for x in inputs]
         prompts_exp = self._expand_column_for_completions(prompt_rows, sample_count)
         sols_exp = self._expand_column_for_completions(solution_rows, sample_count)
-        ended_eos = self._completion_ended_with_eos(completion_ids, completion_mask)
+        ended_eos = self._completion_ended_with_eos(completion_ids, snap_mask)
 
         grpo_adv_list = None
         if seq_advantages_1d is not None and seq_advantages_1d.dim() == 1:
@@ -110,10 +172,14 @@ class RLSDTrainer(GRPOTrainer):
 
         samples: List[Dict[str, Any]] = []
         for i in range(sample_count):
+            sol_i = str(sols_exp[i]) if i < len(sols_exp) else ""
+            comp_i = completions[i]
             item: Dict[str, Any] = {
                 "prompt": prompts_exp[i] if i < len(prompts_exp) else "",
-                "solution": str(sols_exp[i]) if i < len(sols_exp) else "",
-                "completion": completions[i],
+                "solution": sol_i,
+                "completion": comp_i,
+                "extracted_answer": extract_math_reward_answer(comp_i, for_ground_truth=False),
+                "extracted_ground_truth": extract_math_reward_answer(sol_i, for_ground_truth=True),
                 "ended_with_eos": ended_eos[i],
             }
             if reward_values is not None and i < len(reward_values):
@@ -124,12 +190,17 @@ class RLSDTrainer(GRPOTrainer):
                 item["token_advantage_mean"] = float(token_adv_mean_list[i])
             samples.append(item)
 
-        self._last_rollout_snapshot = {
+        payload: Dict[str, Any] = {
             "rollout_global_step": int(getattr(self.state, "global_step", -1)),
             "epoch": float(getattr(self.state, "epoch", 0.0) or 0.0),
             "num_generations": int(getattr(self, "num_generations", 1)),
             "samples": samples,
         }
+        if reward_values is not None and sample_count > 0:
+            n = min(len(reward_values), sample_count)
+            if n > 0:
+                payload["acc"] = float(sum(float(reward_values[i]) for i in range(n)) / n)
+        self._last_rollout_snapshot = payload
 
     def _prompt_to_text(self, prompt: Any) -> str:
         if isinstance(prompt, str):
@@ -137,7 +208,11 @@ class RLSDTrainer(GRPOTrainer):
         tokenizer = self._get_tokenizer()
         if hasattr(tokenizer, "apply_chat_template"):
             try:
-                return tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+                return apply_qwen3_rollout_chat_template(
+                    tokenizer,
+                    prompt,
+                    enable_thinking=False,
+                )
             except Exception:
                 pass
         return str(prompt)

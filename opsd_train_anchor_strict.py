@@ -8,8 +8,17 @@ from peft import LoraConfig, TaskType
 from transformers import AutoTokenizer, HfArgumentParser, TrainerCallback
 from trl import GRPOConfig
 
-from data_utils import load_rlsd_dataset
-from reward_fn import verifiable_math_reward, verifiable_math_reward_with_format_penalties
+from data_utils import (
+    DEFAULT_MATH_INSTRUCTION_SUFFIX,
+    coerce_prompt_to_qwen3_user_messages,
+    load_rlsd_dataset,
+    normalize_prompt_to_standard_instruction,
+)
+from reward_fn import (
+    configure_math_reward_extraction,
+    verifiable_math_reward,
+    verifiable_math_reward_with_format_penalties,
+)
 from rlsd_rollout_snapshot import SaveRolloutSnapshotCallback
 from rlsd_sign_fallback_strict_trainer import RLSDSignFallbackStrictTrainer
 
@@ -23,6 +32,10 @@ class ScriptArguments:
     run_config: str = "rlsd_strict_4b"
     prompt_prefix: str = ""
     prompt_suffix: str = ""
+    # Enable by default so DAPO/OpenR1 boilerplate ("Solve the following ...") is removed
+    # even when caller forgets to pass the CLI flag.
+    normalize_math_prompt_to_standard_suffix: bool = True
+    math_instruction_suffix: str = DEFAULT_MATH_INSTRUCTION_SUFFIX
 
     # mixed-group RLSD
     lmbda: float = 0.5
@@ -52,6 +65,12 @@ class ScriptArguments:
     reward_no_eos_penalty: float = 0.15
     reward_multi_boxed_penalty: float = 0.15
     reward_min_consecutive_boxed: int = 2
+    reward_repeat_triplet_penalty: float = 0.15
+    reward_repeat_triplet_levenshtein_threshold: int = 0
+    # Qwen3: non-thinking rollout; TRL also gets explicit ``chat_template_kwargs`` when supported.
+    disable_thinking_in_chat_template: bool = True
+    # Only credit ``\\boxed{}`` / ``<answer>`` starting in the last this fraction of completion **tokens** (0 = off).
+    reward_boxed_last_token_fraction: float = 0.05
     # DAPO-style asymmetric clipping for positive-advantage samples:
     # upper clip bound becomes (1 + epsilon_high) for adv>0.
     dapo_epsilon_high: Optional[float] = None
@@ -71,6 +90,8 @@ class ScriptArguments:
     disable_wandb: bool = False
     # When true, each checkpoint save also writes rollout_snapshot_step_*.json (last mini-batch rollout).
     save_rollout_snapshots: bool = True
+    # Also write the same JSON every N global steps (0 = disable periodic dumps; checkpoint-only).
+    rollout_snapshot_interval_steps: int = 2
     generation_extra_kwargs_json: Optional[str] = None
 
 
@@ -96,14 +117,53 @@ def build_reward_fn(args: ScriptArguments):
                 no_eos_penalty=args.reward_no_eos_penalty,
                 multi_boxed_penalty=args.reward_multi_boxed_penalty,
                 min_consecutive_boxed=args.reward_min_consecutive_boxed,
+                repeat_triplet_penalty=args.reward_repeat_triplet_penalty,
+                repeat_triplet_levenshtein_threshold=args.reward_repeat_triplet_levenshtein_threshold,
             )
         return verifiable_math_reward(text_completions, solution)
 
     return reward_fn
 
 
-def apply_prompt_wrapping(prompt: str, prefix: str, suffix: str) -> str:
-    p = prompt if isinstance(prompt, str) else str(prompt)
+def apply_prompt_wrapping(prompt, prefix: str, suffix: str):
+    """Prefix/suffix on plain strings, or on the last user text turn in chat-style ``prompt`` lists."""
+    if not prefix and not suffix:
+        return prompt
+    if isinstance(prompt, list):
+        out = [dict(m) if isinstance(m, dict) else m for m in prompt]
+        last_user_idx = None
+        for i, msg in enumerate(out):
+            if isinstance(msg, dict) and str(msg.get("role", "")).lower() == "user":
+                last_user_idx = i
+        if last_user_idx is None and len(out) == 1 and isinstance(out[0], dict) and "content" in out[0]:
+            last_user_idx = 0
+        if last_user_idx is None:
+            return prompt
+        user_msg = dict(out[last_user_idx])
+        content = user_msg.get("content", "")
+        if isinstance(content, list):
+            new_parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    t = str(part.get("text", ""))
+                    if prefix:
+                        t = f"{prefix}{t}"
+                    if suffix:
+                        t = f"{t}{suffix}"
+                    new_parts.append({**part, "text": t})
+                else:
+                    new_parts.append(part)
+            user_msg["content"] = new_parts
+        else:
+            t = str(content)
+            if prefix:
+                t = f"{prefix}{t}"
+            if suffix:
+                t = f"{t}{suffix}"
+            user_msg["content"] = t
+        out[last_user_idx] = user_msg
+        return out
+    p = prompt.strip() if isinstance(prompt, str) else str(prompt).strip()
     if prefix:
         p = f"{prefix}{p}"
     if suffix:
@@ -182,6 +242,11 @@ def main():
         training_args.max_prompt_length = max(32, script_args.max_length - training_args.max_completion_length)
 
     setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
+    setattr(
+        training_args,
+        "rollout_snapshot_interval_steps",
+        int(script_args.rollout_snapshot_interval_steps),
+    )
 
     if script_args.generation_extra_kwargs_json and str(script_args.generation_extra_kwargs_json).strip():
         try:
@@ -194,7 +259,23 @@ def main():
         merged.update(extra)
         training_args.generation_kwargs = merged
 
+    if script_args.disable_thinking_in_chat_template and hasattr(training_args, "chat_template_kwargs"):
+        _ct = dict(getattr(training_args, "chat_template_kwargs") or {})
+        _ct["enable_thinking"] = False
+        training_args.chat_template_kwargs = _ct
+
     train_dataset = load_rlsd_dataset(script_args.dataset_path, split=script_args.dataset_split)
+    if script_args.normalize_math_prompt_to_standard_suffix:
+        train_dataset = train_dataset.map(
+            lambda row: {
+                **row,
+                "prompt": normalize_prompt_to_standard_instruction(
+                    row.get("prompt", ""),
+                    suffix=script_args.math_instruction_suffix,
+                ),
+            },
+            desc="Normalize math user prompt (stem + standard boxed instruction)",
+        )
     if script_args.prompt_prefix or script_args.prompt_suffix:
         train_dataset = train_dataset.map(
             lambda row: {
@@ -208,9 +289,56 @@ def main():
             desc="Applying rollout prompt wrapping",
         )
 
+    train_dataset = train_dataset.map(
+        lambda row: {
+            **row,
+            "prompt": coerce_prompt_to_qwen3_user_messages(row.get("prompt", "")),
+        },
+        desc="Qwen3 rollout style: string prompt -> single-turn user messages (TRL apply_chat_template path)",
+    )
+
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    configure_math_reward_extraction(
+        tokenizer=tokenizer,
+        boxed_last_token_fraction=float(script_args.reward_boxed_last_token_fraction),
+    )
+
+    if script_args.disable_thinking_in_chat_template:
+        _orig_apply_chat = tokenizer.apply_chat_template
+
+        def _apply_chat_no_think(messages, *args, **kwargs):
+            kw = dict(kwargs)
+            kw["enable_thinking"] = False
+            try:
+                return _orig_apply_chat(messages, *args, **kw)
+            except TypeError:
+                kw.pop("enable_thinking", None)
+                return _orig_apply_chat(messages, *args, **kw)
+
+        tokenizer.apply_chat_template = _apply_chat_no_think
+        _inner = getattr(tokenizer, "tokenizer", None)
+        if _inner is not None and _inner is not tokenizer and hasattr(_inner, "apply_chat_template"):
+            _orig_inner_apply = _inner.apply_chat_template
+
+            def _inner_apply_no_think(messages, *args, **kwargs):
+                kw = dict(kwargs)
+                kw["enable_thinking"] = False
+                try:
+                    return _orig_inner_apply(messages, *args, **kw)
+                except TypeError:
+                    kw.pop("enable_thinking", None)
+                    return _orig_inner_apply(messages, *args, **kw)
+
+            _inner.apply_chat_template = _inner_apply_no_think
+        print(
+            "[chat_template] enable_thinking=False: tokenizer monkey-patch + "
+            f"training_args.chat_template_kwargs={getattr(training_args, 'chat_template_kwargs', {})} "
+            "(disable_thinking_in_chat_template=True)",
+            flush=True,
+        )
 
     peft_config = build_peft_config(script_args)
 
@@ -246,7 +374,12 @@ def main():
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
     if script_args.save_rollout_snapshots:
         trainer.add_callback(SaveRolloutSnapshotCallback(trainer))
-        print(f"[rollout_snapshot] enabled -> {training_args.output_dir}/rollout_snapshot_step_*.json on each save")
+        _iv = int(getattr(training_args, "rollout_snapshot_interval_steps", 0) or 0)
+        _extra = f" + every {_iv} steps" if _iv > 0 else ""
+        print(
+            f"[rollout_snapshot] enabled -> {training_args.output_dir}/rollout_snapshot_step_*.json "
+            f"on checkpoint save{_extra}"
+        )
 
     model_for_grad = trainer.model
     if hasattr(trainer, "accelerator"):

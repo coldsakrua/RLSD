@@ -23,7 +23,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset ROCR_VISIBLE_DEVICES
 
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
-DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/aggregated_l3plus/train.parquet}
+# Raw DAPO: data/dapo/dapo-math-17k.parquet — preprocess once: bash scripts/run_preprocess_dapo_math.sh
+# Then point DATASET_PATH at data/dapo/dapo-math-17k-standard-boxed.parquet and set NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=false.
+DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k-strict-boxed.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
 OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_strict}
 RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_strict}
@@ -37,7 +39,9 @@ PER_DEVICE_BS=${PER_DEVICE_BS:-2}
 MAX_STEPS=${MAX_STEPS:-300}
 MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
 PROMPT_PREFIX=${PROMPT_PREFIX:-}
-PROMPT_SUFFIX=${PROMPT_SUFFIX:-$'\n\nPlease reason step by step, and put your final answer within \\boxed{}.'}
+PROMPT_SUFFIX=${PROMPT_SUFFIX:-}
+NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX:-false}
+MATH_INSTRUCTION_SUFFIX=${MATH_INSTRUCTION_SUFFIX:-}
 
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
 WARMUP_RATIO=${WARMUP_RATIO:-0.05}
@@ -109,7 +113,12 @@ REWARD_FORMAT_PENALTIES=${REWARD_FORMAT_PENALTIES:-true}
 REWARD_NO_EOS_PENALTY=${REWARD_NO_EOS_PENALTY:-0.15}
 REWARD_MULTI_BOXED_PENALTY=${REWARD_MULTI_BOXED_PENALTY:-0.15}
 REWARD_MIN_CONSECUTIVE_BOXED=${REWARD_MIN_CONSECUTIVE_BOXED:-2}
+REWARD_REPEAT_TRIPLET_PENALTY=${REWARD_REPEAT_TRIPLET_PENALTY:-0.15}
+REWARD_REPEAT_TRIPLET_LEV_THRESHOLD=${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD:-0}
+DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}
+REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
 SAVE_ROLLOUT_SNAPSHOTS=${SAVE_ROLLOUT_SNAPSHOTS:-true}
+ROLLOUT_SNAPSHOT_INTERVAL_STEPS=${ROLLOUT_SNAPSHOT_INTERVAL_STEPS:-10}
 DAPO_EPSILON=${DAPO_EPSILON:-0.1}
 DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.2}
 
@@ -145,6 +154,11 @@ trl vllm-serve \
     > "${VLLM_SERVER_LOG}" 2>&1 &
 VLLM_SERVER_PID=$!
 
+_MATH_SUFFIX_ARGS=()
+if [ -n "${MATH_INSTRUCTION_SUFFIX}" ]; then
+    _MATH_SUFFIX_ARGS+=(--math_instruction_suffix "${MATH_INSTRUCTION_SUFFIX}")
+fi
+
 echo "[launch] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES} lr=${LEARNING_RATE} sched=${LR_SCHEDULER_TYPE} ${_WU_DESC}"
 CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --config_file accelerate.yaml \
@@ -158,6 +172,8 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --dataset_cache_dir "${DATASET_CACHE_DIR}" \
     --prompt_prefix "${PROMPT_PREFIX}" \
     --prompt_suffix "${PROMPT_SUFFIX}" \
+    --normalize_math_prompt_to_standard_suffix "${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX}" \
+    "${_MATH_SUFFIX_ARGS[@]}" \
     "${TRAIN_LR_ARGS[@]}" \
     --max_grad_norm 1.0 \
     --per_device_train_batch_size "${PER_DEVICE_BS}" \
@@ -171,7 +187,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --logging_steps 2 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
-    --max_length 4096 \
+    --max_length 3072 \
     --beta 0 \
     --use_vllm \
     --vllm_mode server \
@@ -212,7 +228,12 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
     --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \
     --reward_min_consecutive_boxed "${REWARD_MIN_CONSECUTIVE_BOXED}" \
+    --reward_repeat_triplet_penalty "${REWARD_REPEAT_TRIPLET_PENALTY}" \
+    --reward_repeat_triplet_levenshtein_threshold "${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD}" \
+    --disable_thinking_in_chat_template "${DISABLE_THINKING_IN_CHAT_TEMPLATE}" \
+    --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
     --save_rollout_snapshots "${SAVE_ROLLOUT_SNAPSHOTS}" \
+    --rollout_snapshot_interval_steps "${ROLLOUT_SNAPSHOT_INTERVAL_STEPS}" \
     --epsilon "${DAPO_EPSILON}" \
     --dapo_epsilon_high "${DAPO_EPSILON_HIGH}" \
     --disable_wandb true \
