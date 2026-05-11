@@ -265,36 +265,32 @@ def main():
         training_args.chat_template_kwargs = _ct
 
     train_dataset = load_rlsd_dataset(script_args.dataset_path, split=script_args.dataset_split)
-    if script_args.normalize_math_prompt_to_standard_suffix:
-        train_dataset = train_dataset.map(
-            lambda row: {
-                **row,
-                "prompt": normalize_prompt_to_standard_instruction(
-                    row.get("prompt", ""),
-                    suffix=script_args.math_instruction_suffix,
-                ),
-            },
-            desc="Normalize math user prompt (stem + standard boxed instruction)",
-        )
-    if script_args.prompt_prefix or script_args.prompt_suffix:
-        train_dataset = train_dataset.map(
-            lambda row: {
-                **row,
-                "prompt": apply_prompt_wrapping(
-                    row.get("prompt", ""),
-                    script_args.prompt_prefix,
-                    script_args.prompt_suffix,
-                ),
-            },
-            desc="Applying rollout prompt wrapping",
-        )
 
+    def _prepare_rollout_prompt(row):
+        prompt = row.get("prompt", "")
+        if script_args.normalize_math_prompt_to_standard_suffix:
+            prompt = normalize_prompt_to_standard_instruction(
+                prompt,
+                suffix=script_args.math_instruction_suffix,
+            )
+        if script_args.prompt_prefix or script_args.prompt_suffix:
+            prompt = apply_prompt_wrapping(
+                prompt,
+                script_args.prompt_prefix,
+                script_args.prompt_suffix,
+            )
+        prompt = coerce_prompt_to_qwen3_user_messages(prompt)
+        return {**row, "prompt": prompt}
+
+    _steps = []
+    if script_args.normalize_math_prompt_to_standard_suffix:
+        _steps.append("normalize")
+    if script_args.prompt_prefix or script_args.prompt_suffix:
+        _steps.append("wrap")
+    _steps.append("qwen3_chat_messages")
     train_dataset = train_dataset.map(
-        lambda row: {
-            **row,
-            "prompt": coerce_prompt_to_qwen3_user_messages(row.get("prompt", "")),
-        },
-        desc="Qwen3 rollout style: string prompt -> single-turn user messages (TRL apply_chat_template path)",
+        _prepare_rollout_prompt,
+        desc=f"Prepare rollout prompt ({' + '.join(_steps)})",
     )
 
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path, trust_remote_code=True)
