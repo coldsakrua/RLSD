@@ -6,7 +6,7 @@ from typing import Optional
 
 from peft import LoraConfig, TaskType
 from transformers import AutoTokenizer, HfArgumentParser, TrainerCallback
-from trl import GRPOConfig
+from trl import GRPOConfig, GRPOTrainer
 
 from data_utils import (
     DEFAULT_MATH_INSTRUCTION_SUFFIX,
@@ -19,8 +19,6 @@ from reward_fn import (
     verifiable_math_reward,
     verifiable_math_reward_with_format_penalties,
 )
-from rlsd_rollout_snapshot import SaveRolloutSnapshotCallback
-from rlsd_sign_fallback_strict_trainer import RLSDSignFallbackStrictTrainer
 
 
 @dataclass
@@ -29,54 +27,12 @@ class ScriptArguments:
     dataset_path: str
     dataset_split: str = "train"
     dataset_cache_dir: Optional[str] = None
-    run_config: str = "rlsd_strict_4b"
+    run_config: str = "grpo_strict_4b"
     prompt_prefix: str = ""
     prompt_suffix: str = ""
-    # Enable by default so DAPO/OpenR1 boilerplate ("Solve the following ...") is removed
-    # even when caller forgets to pass the CLI flag.
     normalize_math_prompt_to_standard_suffix: bool = True
     math_instruction_suffix: str = DEFAULT_MATH_INSTRUCTION_SUFFIX
-    # Keep raw DAPO prompt text (including dataset-native instruction format) instead of
-    # normalizing to the standard boxed suffix template.
     use_dapo_raw_prompt: bool = False
-
-    # mixed-group RLSD
-    lmbda: float = 0.5
-    lmbda_decay_steps: int = 50
-    jsd_token_clip: float = 0.05
-    rollout_filter: str = "all"
-    fixed_teacher: bool = True
-    teacher_prompt_template: str = (
-        "{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n"
-    )
-
-    # all-correct/all-wrong fallback
-    lambda_plus: float = 0.3
-    lambda_minus: float = 0.3
-    lambda_plus_min: float = 0.0
-    lambda_minus_min: float = 0.0
-    fallback_decay_steps: int = 50
-    fallback_eps0: float = 0.05
-    adv_clip_low: float = -1.0
-    adv_clip_high: float = 1.0
-    suppress_gt_shortcut: bool = True
-    answer_token_downweight: float = 0.2
-    reward_binary_threshold: float = 0.5
-    fallback_tail_tokens: int = 8
-    # Penalties applied on top of correctness (see reward_fn.verifiable_math_reward_with_format_penalties).
-    reward_format_penalties: bool = True
-    reward_no_eos_penalty: float = 0.15
-    reward_multi_boxed_penalty: float = 0.15
-    reward_min_consecutive_boxed: int = 2
-    reward_repeat_triplet_penalty: float = 0.15
-    reward_repeat_triplet_levenshtein_threshold: int = 0
-    # Qwen3: non-thinking rollout; TRL also gets explicit ``chat_template_kwargs`` when supported.
-    disable_thinking_in_chat_template: bool = True
-    # Only credit ``\\boxed{}`` / ``<answer>`` starting in the last this fraction of completion **tokens** (0 = off).
-    reward_boxed_last_token_fraction: float = 0.05
-    # DAPO-style asymmetric clipping for positive-advantage samples:
-    # upper clip bound becomes (1 + epsilon_high) for adv>0.
-    dapo_epsilon_high: Optional[float] = None
 
     max_length: Optional[int] = None
     attn_implementation: Optional[str] = None
@@ -91,11 +47,19 @@ class ScriptArguments:
     )
 
     disable_wandb: bool = False
-    # When true, each checkpoint save also writes rollout_snapshot_step_*.json (last mini-batch rollout).
-    save_rollout_snapshots: bool = True
-    # Also write the same JSON every N global steps (0 = disable periodic dumps; checkpoint-only).
-    rollout_snapshot_interval_steps: int = 2
+    # Kept for CLI compatibility with strict RLSD script; plain GRPO trainer does not emit rollout snapshots here.
+    save_rollout_snapshots: bool = False
+    rollout_snapshot_interval_steps: int = 0
     generation_extra_kwargs_json: Optional[str] = None
+
+    reward_format_penalties: bool = True
+    reward_no_eos_penalty: float = 0.15
+    reward_multi_boxed_penalty: float = 0.15
+    reward_min_consecutive_boxed: int = 2
+    reward_repeat_triplet_penalty: float = 0.15
+    reward_repeat_triplet_levenshtein_threshold: int = 0
+    disable_thinking_in_chat_template: bool = True
+    reward_boxed_last_token_fraction: float = 0.0
 
 
 def _to_text_completion(completion) -> str:
@@ -108,8 +72,6 @@ def _to_text_completion(completion) -> str:
 
 
 def build_reward_fn(args: ScriptArguments):
-    """Closure so format-penalty weights live in ScriptArguments."""
-
     def reward_fn(completions, solution, ended_with_eos=None, **kwargs):
         text_completions = [_to_text_completion(c) for c in completions]
         if args.reward_format_penalties:
@@ -129,7 +91,6 @@ def build_reward_fn(args: ScriptArguments):
 
 
 def apply_prompt_wrapping(prompt, prefix: str, suffix: str):
-    """Prefix/suffix on plain strings, or on the last user text turn in chat-style ``prompt`` lists."""
     if not prefix and not suffix:
         return prompt
     if isinstance(prompt, list):
@@ -189,7 +150,6 @@ def build_peft_config(args: ScriptArguments) -> Optional[LoraConfig]:
 
 
 def enforce_lora_only_trainable(model) -> None:
-    """Freeze all non-LoRA parameters to guarantee adapter-only updates."""
     for name, param in model.named_parameters():
         param.requires_grad_("lora_" in name.lower())
 
@@ -225,9 +185,6 @@ def main():
     if script_args.run_config:
         training_args.run_name = script_args.run_config
 
-    if script_args.dapo_epsilon_high is not None:
-        setattr(training_args, "epsilon_high", float(script_args.dapo_epsilon_high))
-
     training_args.remove_unused_columns = False
     if training_args.gradient_checkpointing and getattr(training_args, "gradient_checkpointing_kwargs", None) in (None, {}):
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
@@ -243,13 +200,18 @@ def main():
         if training_args.max_completion_length is None:
             raise ValueError("When --max_length is set, --max_completion_length must also be set.")
         training_args.max_prompt_length = max(32, script_args.max_length - training_args.max_completion_length)
-
-    setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
-    setattr(
-        training_args,
-        "rollout_snapshot_interval_steps",
-        int(script_args.rollout_snapshot_interval_steps),
-    )
+        print(
+            f"[length_budget] max_length={script_args.max_length}, "
+            f"max_completion_length={training_args.max_completion_length}, "
+            f"computed_max_prompt_length={training_args.max_prompt_length}",
+            flush=True,
+        )
+        if training_args.max_prompt_length <= 64:
+            print(
+                "[length_budget][warn] max_prompt_length is very small (<=64). "
+                "This can cause severe prompt truncation and off-topic generations.",
+                flush=True,
+            )
 
     if script_args.generation_extra_kwargs_json and str(script_args.generation_extra_kwargs_json).strip():
         try:
@@ -277,6 +239,7 @@ def main():
             "[prompt_mode] use_dapo_raw_prompt=True -> skip standard suffix normalization in training map.",
             flush=True,
         )
+
     do_prompt_standardize = (
         bool(script_args.normalize_math_prompt_to_standard_suffix)
         and not bool(script_args.use_dapo_raw_prompt)
@@ -301,8 +264,6 @@ def main():
                 script_args.prompt_prefix,
                 script_args.prompt_suffix,
             )
-        # Raw DAPO mode: keep dataset-native prompt text as-is.
-        # Default mode: convert to single-turn user messages so TRL uses chat_template.
         if not script_args.use_dapo_raw_prompt:
             prompt = coerce_prompt_to_qwen3_user_messages(prompt)
         return {**row, "prompt": prompt}
@@ -373,44 +334,20 @@ def main():
 
     peft_config = build_peft_config(script_args)
 
-    trainer = RLSDSignFallbackStrictTrainer(
+    trainer = GRPOTrainer(
         model=script_args.model_name_or_path,
         reward_funcs=build_reward_fn(script_args),
         args=training_args,
         train_dataset=train_dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
-        lmbda=script_args.lmbda,
-        lmbda_decay_steps=script_args.lmbda_decay_steps,
-        jsd_token_clip=script_args.jsd_token_clip,
-        fixed_teacher=script_args.fixed_teacher,
-        rollout_filter=script_args.rollout_filter,
-        teacher_prompt_template=script_args.teacher_prompt_template,
-        lambda_plus=script_args.lambda_plus,
-        lambda_minus=script_args.lambda_minus,
-        lambda_plus_min=script_args.lambda_plus_min,
-        lambda_minus_min=script_args.lambda_minus_min,
-        fallback_decay_steps=script_args.fallback_decay_steps,
-        fallback_eps0=script_args.fallback_eps0,
-        adv_clip_low=script_args.adv_clip_low,
-        adv_clip_high=script_args.adv_clip_high,
-        suppress_gt_shortcut=script_args.suppress_gt_shortcut,
-        answer_token_downweight=script_args.answer_token_downweight,
-        reward_binary_threshold=script_args.reward_binary_threshold,
-        fallback_tail_tokens=script_args.fallback_tail_tokens,
     )
 
     metrics_jsonl_path = os.path.join(training_args.output_dir, "train_metrics.jsonl")
     trainer.add_callback(JsonMetricsCallback(metrics_jsonl_path))
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
     if script_args.save_rollout_snapshots:
-        trainer.add_callback(SaveRolloutSnapshotCallback(trainer))
-        _iv = int(getattr(training_args, "rollout_snapshot_interval_steps", 0) or 0)
-        _extra = f" + every {_iv} steps" if _iv > 0 else ""
-        print(
-            f"[rollout_snapshot] enabled -> {training_args.output_dir}/rollout_snapshot_step_*.json "
-            f"on checkpoint save{_extra}"
-        )
+        print("[rollout_snapshot] skipped: plain GRPO trainer does not produce RLSD rollout snapshots.")
 
     model_for_grad = trainer.model
     if hasattr(trainer, "accelerator"):
