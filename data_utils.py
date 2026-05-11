@@ -321,9 +321,9 @@ def load_rlsd_dataset(
             row["prompt"] = prompt
             return row
 
-        _desc = "Normalizing DAPO schema (prompt + reward_model.ground_truth)"
+        _desc = "DAPO schema: extract solution from reward_model.ground_truth + normalize prompt"
         if not normalize_dapo_prompt:
-            _desc = "Normalizing DAPO schema (keep raw prompt + reward_model.ground_truth)"
+            _desc = "DAPO schema: extract solution from reward_model.ground_truth + keep raw prompt"
         ds = ds.map(_normalize_dapo, desc=_desc)
         return ds
 
