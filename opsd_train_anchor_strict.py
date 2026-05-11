@@ -36,6 +36,9 @@ class ScriptArguments:
     # even when caller forgets to pass the CLI flag.
     normalize_math_prompt_to_standard_suffix: bool = True
     math_instruction_suffix: str = DEFAULT_MATH_INSTRUCTION_SUFFIX
+    # Keep raw DAPO prompt text (including dataset-native instruction format) instead of
+    # normalizing to the standard boxed suffix template.
+    use_dapo_raw_prompt: bool = False
 
     # mixed-group RLSD
     lmbda: float = 0.5
@@ -264,11 +267,24 @@ def main():
         _ct["enable_thinking"] = False
         training_args.chat_template_kwargs = _ct
 
-    train_dataset = load_rlsd_dataset(script_args.dataset_path, split=script_args.dataset_split)
+    train_dataset = load_rlsd_dataset(
+        script_args.dataset_path,
+        split=script_args.dataset_split,
+        normalize_dapo_prompt=not script_args.use_dapo_raw_prompt,
+    )
+    if script_args.use_dapo_raw_prompt and script_args.normalize_math_prompt_to_standard_suffix:
+        print(
+            "[prompt_mode] use_dapo_raw_prompt=True -> skip standard suffix normalization in training map.",
+            flush=True,
+        )
+    do_prompt_standardize = (
+        bool(script_args.normalize_math_prompt_to_standard_suffix)
+        and not bool(script_args.use_dapo_raw_prompt)
+    )
 
     def _prepare_rollout_prompt(row):
         prompt = row.get("prompt", "")
-        if script_args.normalize_math_prompt_to_standard_suffix:
+        if do_prompt_standardize:
             prompt = normalize_prompt_to_standard_instruction(
                 prompt,
                 suffix=script_args.math_instruction_suffix,
@@ -283,7 +299,7 @@ def main():
         return {**row, "prompt": prompt}
 
     _steps = []
-    if script_args.normalize_math_prompt_to_standard_suffix:
+    if do_prompt_standardize:
         _steps.append("normalize")
     if script_args.prompt_prefix or script_args.prompt_suffix:
         _steps.append("wrap")

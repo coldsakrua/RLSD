@@ -38,10 +38,14 @@ GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
 PER_DEVICE_BS=${PER_DEVICE_BS:-2}
 MAX_STEPS=${MAX_STEPS:-300}
 MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
+# Keep enough prompt budget: trainer computes max_prompt_length = max_length - max_completion_length.
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+MAX_LENGTH=$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))
 PROMPT_PREFIX=${PROMPT_PREFIX:-}
 PROMPT_SUFFIX=${PROMPT_SUFFIX:-}
-NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX:-false}
+NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX:-true}
 MATH_INSTRUCTION_SUFFIX=${MATH_INSTRUCTION_SUFFIX:-}
+USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-false}
 
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
 WARMUP_RATIO=${WARMUP_RATIO:-0.05}
@@ -173,6 +177,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --prompt_prefix "${PROMPT_PREFIX}" \
     --prompt_suffix "${PROMPT_SUFFIX}" \
     --normalize_math_prompt_to_standard_suffix "${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX}" \
+    --use_dapo_raw_prompt "${USE_DAPO_RAW_PROMPT}" \
     "${_MATH_SUFFIX_ARGS[@]}" \
     "${TRAIN_LR_ARGS[@]}" \
     --max_grad_norm 1.0 \
@@ -187,7 +192,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --logging_steps 2 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
-    --max_length 3072 \
+    --max_length "${MAX_LENGTH}" \
     --beta 0 \
     --use_vllm \
     --vllm_mode server \

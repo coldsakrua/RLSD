@@ -32,6 +32,9 @@ except Exception:
 # Legacy shallow boxed (no nested braces). Prefer `_find_boxed_balanced` for scoring.
 _BOXED_RE = re.compile(r"\\boxed\{([^{}]+)\}")
 _ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL)
+_ANSWER_LINE_RE = re.compile(
+    r"(?im)^\s*(?:final\s+answer|answer)\s*:\s*(.+?)\s*$",
+)
 
 _BOXED_BEGIN = "\\boxed{"
 
@@ -258,6 +261,18 @@ def _extract_final_answer(text: str, *, for_ground_truth: bool = False) -> str:
         tag_matches = _ANSWER_TAG_RE.findall(text)
         if tag_matches:
             return tag_matches[-1].strip()
+
+    if frac > 0 and not for_ground_truth:
+        last_line_ans = None
+        for m in _ANSWER_LINE_RE.finditer(text):
+            if m.start() >= tail_start:
+                last_line_ans = m.group(1).strip()
+        if last_line_ans is not None:
+            return last_line_ans
+    else:
+        ans_matches = _ANSWER_LINE_RE.findall(text)
+        if ans_matches:
+            return ans_matches[-1].strip()
 
     boxed = _find_boxed_balanced(text)
     if frac > 0 and not for_ground_truth:

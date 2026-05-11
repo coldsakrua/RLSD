@@ -22,6 +22,10 @@ _LEADING_LAST_LINE_ANSWER_BLOCK = re.compile(
     r"^\s*The last line of your response should be.+?answer\s+to\s+the\s+problem\.\s*",
     re.IGNORECASE | re.DOTALL,
 )
+_ANSWER_LINE_FORMAT_HINT = re.compile(
+    r'\s*Remember\s+to\s+put\s+your\s+answer\s+on\s+its\s+own\s+line\s+after\s*(?:\\?["“”\'])?\s*Answer\s*:?\s*(?:\\?["“”\'])?\.?\s*',
+    re.IGNORECASE | re.DOTALL,
+)
 _TRAILING_REASON_BOXED = re.compile(
     r"\s*Please\s+reason\s+step\s+by\s+step.*$",
     re.IGNORECASE | re.DOTALL,
@@ -218,6 +222,7 @@ def _strip_math_prompt_boilerplate(text: str) -> str:
         t = m.group(1).strip()
     t = _LEADING_STEP_BY_STEP.sub("", t)
     t = _LEADING_LAST_LINE_ANSWER_BLOCK.sub("", t)
+    t = _ANSWER_LINE_FORMAT_HINT.sub("\n\n", t)
     t = _TRAILING_REASON_BOXED.sub("", t).strip()
     return t
 
@@ -281,7 +286,12 @@ def normalize_prompt_to_standard_instruction(
     return prompt
 
 
-def load_rlsd_dataset(dataset_path: str, split: str = "train") -> Dataset:
+def load_rlsd_dataset(
+    dataset_path: str,
+    split: str = "train",
+    *,
+    normalize_dapo_prompt: bool = True,
+) -> Dataset:
     data_file = _resolve_data_file(dataset_path, split)
     ds = _load_single_file(data_file, split=split)
 
@@ -305,14 +315,16 @@ def load_rlsd_dataset(dataset_path: str, split: str = "train") -> Dataset:
 
         def _normalize_dapo(row):
             row["solution"] = _ground_truth_from_reward_model(row.get("reward_model"))
-            # Always strip DAPO/OpenR1-style wrappers here. This makes prompt cleaning
-            # robust even if upper-level script flags are omitted.
-            row["prompt"] = normalize_prompt_to_standard_instruction(
-                _coerce_prompt_for_rlsd(row.get("prompt")),
-            )
+            prompt = _coerce_prompt_for_rlsd(row.get("prompt"))
+            if normalize_dapo_prompt:
+                prompt = normalize_prompt_to_standard_instruction(prompt)
+            row["prompt"] = prompt
             return row
 
-        ds = ds.map(_normalize_dapo, desc="Normalizing DAPO schema (prompt + reward_model.ground_truth)")
+        _desc = "Normalizing DAPO schema (prompt + reward_model.ground_truth)"
+        if not normalize_dapo_prompt:
+            _desc = "Normalizing DAPO schema (keep raw prompt + reward_model.ground_truth)"
+        ds = ds.map(_normalize_dapo, desc=_desc)
         return ds
 
     prompt_key = _pick_key(_PROMPT_KEYS, ds.column_names)
