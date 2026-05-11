@@ -281,6 +281,12 @@ def main():
         bool(script_args.normalize_math_prompt_to_standard_suffix)
         and not bool(script_args.use_dapo_raw_prompt)
     )
+    use_raw_prompt_passthrough = (
+        bool(script_args.use_dapo_raw_prompt)
+        and not do_prompt_standardize
+        and not script_args.prompt_prefix
+        and not script_args.prompt_suffix
+    )
 
     def _prepare_rollout_prompt(row):
         prompt = row.get("prompt", "")
@@ -295,7 +301,10 @@ def main():
                 script_args.prompt_prefix,
                 script_args.prompt_suffix,
             )
-        prompt = coerce_prompt_to_qwen3_user_messages(prompt)
+        # Raw DAPO mode: keep dataset-native prompt text as-is.
+        # Default mode: convert to single-turn user messages so TRL uses chat_template.
+        if not script_args.use_dapo_raw_prompt:
+            prompt = coerce_prompt_to_qwen3_user_messages(prompt)
         return {**row, "prompt": prompt}
 
     _steps = []
@@ -303,11 +312,21 @@ def main():
         _steps.append("normalize")
     if script_args.prompt_prefix or script_args.prompt_suffix:
         _steps.append("wrap")
-    _steps.append("qwen3_chat_messages")
-    train_dataset = train_dataset.map(
-        _prepare_rollout_prompt,
-        desc=f"Prepare rollout prompt ({' + '.join(_steps)})",
-    )
+    if script_args.use_dapo_raw_prompt:
+        _steps.append("raw_prompt_passthrough")
+    else:
+        _steps.append("qwen3_chat_messages")
+
+    if use_raw_prompt_passthrough:
+        print(
+            "[prompt_mode] raw DAPO prompt passthrough: skip rollout prompt map.",
+            flush=True,
+        )
+    else:
+        train_dataset = train_dataset.map(
+            _prepare_rollout_prompt,
+            desc=f"Prepare rollout prompt ({' + '.join(_steps)})",
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
