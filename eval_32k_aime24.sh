@@ -32,7 +32,7 @@ NO_THINKING=${NO_THINKING:-1}
 datasets_csv=${DATASETS:-aime24,aime26}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict/job_1705844/checkpoint-150}}
+checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict/job_1707856/checkpoint-300}}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
 use_lora=${USE_LORA:-1}
 num_samples=${NUM_SAMPLES:-0}
@@ -45,8 +45,22 @@ elif [[ "${NO_THINKING}" == "1" ]]; then
 else
   max_new_tokens=38912
 fi
-temperature=${TEMPERATURE:-0.6}
-top_p=${TOP_P:-0.95}
+if [[ -n "${TEMPERATURE:-}" ]]; then
+  temperature="${TEMPERATURE}"
+elif [[ "${NO_THINKING}" == "1" ]]; then
+  temperature=0.7
+else
+  temperature=0.6
+fi
+
+if [[ -n "${TOP_P:-}" ]]; then
+  top_p="${TOP_P}"
+elif [[ "${NO_THINKING}" == "1" ]]; then
+  top_p=0.8
+else
+  top_p=0.95
+fi
+
 top_k=${TOP_K:-20}
 min_p=${MIN_P:-0.0}
 presence_penalty=${PRESENCE_PENALTY:-0.0}
