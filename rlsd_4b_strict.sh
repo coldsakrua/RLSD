@@ -25,7 +25,7 @@ unset ROCR_VISIBLE_DEVICES
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
 # Raw DAPO: data/dapo/dapo-math-17k.parquet — preprocess once: bash scripts/run_preprocess_dapo_math.sh
 # Then point DATASET_PATH at data/dapo/dapo-math-17k-standard-boxed.parquet and set NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=false.
-DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k-standard-boxed.parquet}
+DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
 OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_strict}
 RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_strict}
