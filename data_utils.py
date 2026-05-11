@@ -77,6 +77,54 @@ def coerce_prompt_to_qwen3_user_messages(prompt: Any) -> list:
     return [{"role": "user", "content": text}]
 
 
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, list):
+        parts: List[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(str(part.get("text", "")))
+                elif "text" in part:
+                    parts.append(str(part.get("text", "")))
+                elif "content" in part:
+                    parts.append(str(part.get("content", "")))
+            elif part is not None:
+                parts.append(str(part))
+        return "\n".join(x.strip() for x in parts if str(x).strip()).strip()
+    if content is None:
+        return ""
+    return str(content).strip()
+
+
+def extract_last_user_text(prompt: Any) -> str:
+    """
+    Best-effort extraction of the last user turn text without chat template tokens.
+    """
+    if isinstance(prompt, list):
+        last_user = None
+        for msg in prompt:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role", "")).lower()
+            if role == "user":
+                last_user = msg
+            elif role == "" and "content" in msg and last_user is None:
+                # Some datasets store single-turn dicts without explicit role.
+                last_user = msg
+        if last_user is not None:
+            return _content_to_text(last_user.get("content", ""))
+        return _content_to_text(prompt)
+    if isinstance(prompt, dict):
+        if "content" in prompt:
+            return _content_to_text(prompt.get("content", ""))
+        return str(prompt).strip()
+    if isinstance(prompt, str):
+        return prompt.strip()
+    if prompt is None:
+        return ""
+    return str(prompt).strip()
+
+
 def apply_qwen3_rollout_chat_template(
     tokenizer,
     prompt: Any,
@@ -161,7 +209,11 @@ def _non_empty_text(x) -> bool:
 def _strip_math_prompt_boilerplate(text: str) -> str:
     """Remove common DAPO-style wrappers so the stem is mostly the math statement."""
     t = text.strip()
-    m = re.search(r"<\|im_start\|>\s*user\s*(.*?)<\|im_end\|>", t, flags=re.IGNORECASE | re.DOTALL)
+    m = re.search(
+        r"<\|im_start\|>\s*user\s*(.*?)(?:<\|im_end\|>|<\|im_start\|>\s*assistant|$)",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     if m:
         t = m.group(1).strip()
     t = _LEADING_STEP_BY_STEP.sub("", t)

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import torch
 from trl import GRPOTrainer
 
-from data_utils import apply_qwen3_rollout_chat_template
+from data_utils import extract_last_user_text, normalize_prompt_to_standard_instruction
 from reward_fn import extract_math_reward_answer
 
 
@@ -203,19 +203,16 @@ class RLSDTrainer(GRPOTrainer):
         self._last_rollout_snapshot = payload
 
     def _prompt_to_text(self, prompt: Any) -> str:
-        if isinstance(prompt, str):
-            return prompt
-        tokenizer = self._get_tokenizer()
-        if hasattr(tokenizer, "apply_chat_template"):
-            try:
-                return apply_qwen3_rollout_chat_template(
-                    tokenizer,
-                    prompt,
-                    enable_thinking=False,
-                )
-            except Exception:
-                pass
-        return str(prompt)
+        text = extract_last_user_text(prompt)
+        if not text:
+            return text
+        try:
+            normalized = normalize_prompt_to_standard_instruction(text)
+            if isinstance(normalized, str):
+                return normalized
+        except Exception:
+            pass
+        return text
 
     def _extract_logps(self, output):
         if isinstance(output, tuple):
