@@ -37,6 +37,7 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         answer_token_downweight: float = 1.0,
         suppress_gt_shortcut: bool = True,
         reward_binary_threshold: float = 0.5,
+        fallback_tail_tokens: int = 8,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -51,6 +52,7 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         self.answer_token_downweight = float(answer_token_downweight)
         self.suppress_gt_shortcut = bool(suppress_gt_shortcut)
         self.reward_binary_threshold = float(reward_binary_threshold)
+        self.fallback_tail_tokens = int(fallback_tail_tokens)
 
     def _current_fallback_lambda(self, start: float, min_value: float) -> float:
         start = float(start)
@@ -136,6 +138,8 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         self,
         completion_texts: List[str],
         completion_mask: torch.Tensor,
+        *,
+        decode_length_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         n, max_len = completion_mask.shape
         device = completion_mask.device
@@ -152,7 +156,8 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
             spans = self._find_answer_spans(text)
             if not spans:
                 continue
-            valid_len = int(completion_mask[i].sum().item())
+            len_src = decode_length_mask if decode_length_mask is not None else completion_mask
+            valid_len = int(len_src[i].sum().item())
             if valid_len <= 0:
                 continue
 
@@ -176,7 +181,7 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
                     pass
 
             # Fallback when offset mapping is unavailable: downweight tail tokens.
-            tail_k = min(valid_len, 8)
+            tail_k = min(valid_len, max(1, self.fallback_tail_tokens))
             weights[i, valid_len - tail_k : valid_len] = down
         return weights
 
@@ -208,7 +213,8 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         clip_low = 1.0 - self.jsd_token_clip
         clip_high = 1.0 + self.jsd_token_clip
 
-        completion_texts = self._decode_completion_texts(completion_ids, completion_mask)
+        snap_mask = self._completion_mask_through_first_eos(completion_ids)
+        completion_texts = self._decode_completion_texts(completion_ids, snap_mask)
         rewards_binary = self._compute_binary_rewards(
             inputs,
             completion_texts,
@@ -255,7 +261,11 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         token_advantages = torch.where(all_correct, plus_adv, token_advantages)
         token_advantages = torch.where(all_wrong, minus_adv, token_advantages)
 
-        answer_weight_mask = self._build_answer_token_weight_mask(completion_texts, completion_mask)
+        answer_weight_mask = self._build_answer_token_weight_mask(
+            completion_texts,
+            completion_mask,
+            decode_length_mask=snap_mask,
+        )
         token_advantages = token_advantages * answer_weight_mask
         token_advantages = torch.clamp(token_advantages, min=self.adv_clip_low, max=self.adv_clip_high)
         token_advantages = token_advantages * completion_mask
