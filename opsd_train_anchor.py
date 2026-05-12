@@ -55,12 +55,12 @@ class ScriptArguments:
     lambda_minus: float = 0.05
     lambda_plus_min: float = 0.0
     lambda_minus_min: float = 0.0
-    fallback_decay_steps: int = 200
+    fallback_decay_steps: int = 50
     fallback_eps0: float = 0.05
     adv_clip_low: float = -1.0
     adv_clip_high: float = 1.0
     suppress_gt_shortcut: bool = True
-    answer_token_downweight: float = 0.2
+    answer_token_downweight: float = 1.0
     reward_binary_threshold: float = 0.5
 
     # JSON string merged into training_args.generation_kwargs after parsing.

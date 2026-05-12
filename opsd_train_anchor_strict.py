@@ -60,15 +60,17 @@ class ScriptArguments:
     adv_clip_low: float = -1.0
     adv_clip_high: float = 1.0
     suppress_gt_shortcut: bool = True
-    answer_token_downweight: float = 0.2
+    # Disabled by default: no downweight on answer tokens.
+    answer_token_downweight: float = 1.0
     reward_binary_threshold: float = 0.5
     fallback_tail_tokens: int = 8
     # Penalties applied on top of correctness (see reward_fn.verifiable_math_reward_with_format_penalties).
-    reward_format_penalties: bool = True
+    # Disabled by default: use pure correctness reward (no format/repetition penalties).
+    reward_format_penalties: bool = False
     reward_no_eos_penalty: float = 0.15
     reward_multi_boxed_penalty: float = 0.15
     reward_min_consecutive_boxed: int = 2
-    reward_repeat_triplet_penalty: float = 0.15
+    reward_repeat_triplet_penalty: float = 0.0
     reward_repeat_triplet_levenshtein_threshold: int = 0
     # Qwen3: non-thinking rollout; TRL also gets explicit ``chat_template_kwargs`` when supported.
     disable_thinking_in_chat_template: bool = True

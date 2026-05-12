@@ -35,7 +35,7 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         fallback_eps0: float = 0.05,
         adv_clip_low: float = -1.0,
         adv_clip_high: float = 1.0,
-        answer_token_downweight: float = 0.2,
+        answer_token_downweight: float = 1.0,
         suppress_gt_shortcut: bool = True,
         reward_binary_threshold: float = 0.5,
         fallback_tail_tokens: int = 8,
