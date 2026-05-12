@@ -63,6 +63,10 @@ class ScriptArguments:
     answer_token_downweight: float = 0.2
     reward_binary_threshold: float = 0.5
 
+    # JSON string merged into training_args.generation_kwargs after parsing.
+    # Works around HfArgumentParser's inability to parse dict-typed CLI args.
+    generation_extra_kwargs_json: Optional[str] = None
+
 
 def _to_text_completion(completion) -> str:
     if isinstance(completion, str):
@@ -175,6 +179,19 @@ def main():
         if training_args.max_completion_length is None:
             raise ValueError("When --max_length is set, --max_completion_length must also be set.")
         training_args.max_prompt_length = max(32, script_args.max_length - training_args.max_completion_length)
+
+    if script_args.generation_extra_kwargs_json and str(script_args.generation_extra_kwargs_json).strip():
+        try:
+            extra = json.loads(script_args.generation_extra_kwargs_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"--generation_extra_kwargs_json is not valid JSON: {e}") from e
+        if not isinstance(extra, dict):
+            raise ValueError(
+                "--generation_extra_kwargs_json must be a JSON object, e.g. '{\"presence_penalty\": 0.2}'"
+            )
+        merged = dict(training_args.generation_kwargs or {})
+        merged.update(extra)
+        training_args.generation_kwargs = merged
 
     setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
     setattr(

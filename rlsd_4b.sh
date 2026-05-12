@@ -110,7 +110,7 @@ accelerate launch \
     --top_k "${TOP_K}" \
     --min_p "${MIN_P}" \
     --repetition_penalty "${REPETITION_PENALTY}" \
-    --generation_kwargs "${GENERATION_KWARGS}" \
+    --generation_extra_kwargs_json "${GENERATION_KWARGS}" \
     --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
     --lmbda "${LMBDA}" \
     --lmbda_decay_steps "${LMBDA_DECAY_STEPS}" \
