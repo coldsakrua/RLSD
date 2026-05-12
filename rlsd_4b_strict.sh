@@ -107,6 +107,7 @@ LAMBDA_PLUS_MIN=${LAMBDA_PLUS_MIN:-0.0}
 LAMBDA_MINUS_MIN=${LAMBDA_MINUS_MIN:-0.0}
 FALLBACK_DECAY_STEPS=${FALLBACK_DECAY_STEPS:-50}
 FALLBACK_EPS0=${FALLBACK_EPS0:-0.05}
+TEACHER_UPDATE_INTERVAL_STEPS=${TEACHER_UPDATE_INTERVAL_STEPS:-10}
 ADV_CLIP_LOW=${ADV_CLIP_LOW:--1.0}
 ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.0}
 SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
@@ -214,7 +215,8 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
     --lmbda "${LMBDA}" \
     --lmbda_decay_steps "${LMBDA_DECAY_STEPS}" \
-    --fixed_teacher true \
+    --fixed_teacher false \
+    --teacher_update_interval_steps "${TEACHER_UPDATE_INTERVAL_STEPS}" \
     --jsd_token_clip "${JSD_TOKEN_CLIP}" \
     --rollout_filter "${ROLLOUT_FILTER}" \
     --lambda_plus "${LAMBDA_PLUS}" \

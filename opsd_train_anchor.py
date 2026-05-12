@@ -30,6 +30,7 @@ class ScriptArguments:
     jsd_token_clip: float = 0.2
     rollout_filter: str = "all"
     fixed_teacher: bool = False
+    teacher_update_interval_steps: int = 10
     teacher_prompt_template: str = (
         "{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n"
     )
@@ -234,6 +235,7 @@ def main():
         fixed_teacher=script_args.fixed_teacher,
         rollout_filter=script_args.rollout_filter,
         teacher_prompt_template=script_args.teacher_prompt_template,
+        teacher_update_interval_steps=script_args.teacher_update_interval_steps,
     )
     if script_args.use_sign_constrained_fallback:
         trainer_kwargs.update(

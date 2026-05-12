@@ -16,6 +16,7 @@ class RLSDTrainer(GRPOTrainer):
         lmbda_decay_steps: int = 50,
         jsd_token_clip: float = 0.2,
         fixed_teacher: bool = False,
+        teacher_update_interval_steps: int = 10,
         rollout_filter: str = "all",
         teacher_prompt_template: str = (
             "{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n"
@@ -27,9 +28,12 @@ class RLSDTrainer(GRPOTrainer):
         self.lmbda_decay_steps = int(lmbda_decay_steps)
         self.jsd_token_clip = float(jsd_token_clip)
         self.fixed_teacher = bool(fixed_teacher)
+        self.teacher_update_interval_steps = max(0, int(teacher_update_interval_steps))
         self.rollout_filter = rollout_filter
         self.teacher_prompt_template = teacher_prompt_template
         self._last_rollout_snapshot: Optional[Dict[str, Any]] = None
+        self._teacher_snapshot_step: int = -1
+        self._teacher_snapshot_state: Optional[Dict[str, torch.Tensor]] = None
 
     def _current_lambda(self) -> float:
         if self.lmbda_decay_steps <= 0:
@@ -236,6 +240,93 @@ class RLSDTrainer(GRPOTrainer):
             prompts.append(self.teacher_prompt_template.format(prompt=prompt, solution=solution))
         return prompts
 
+    def _teacher_anchor_step(self) -> int:
+        step = int(getattr(self.state, "global_step", 0) or 0)
+        interval = max(1, self.teacher_update_interval_steps)
+        return (step // interval) * interval
+
+    def _unwrap_model_for_teacher(self):
+        model = self.model
+        if hasattr(self, "accelerator"):
+            try:
+                model = self.accelerator.unwrap_model(model)
+            except Exception:
+                pass
+        return model
+
+    def _select_teacher_snapshot_params(self, model) -> List[tuple[str, torch.nn.Parameter]]:
+        params = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
+        if params:
+            return params
+        # Fallback: if grad flags were altered unexpectedly, at least snapshot LoRA params.
+        return [(name, p) for name, p in model.named_parameters() if "lora_" in name.lower()]
+
+    def _refresh_teacher_snapshot_if_needed(self, model) -> None:
+        if self.teacher_update_interval_steps <= 0:
+            return
+        anchor = self._teacher_anchor_step()
+        if self._teacher_snapshot_state is not None and self._teacher_snapshot_step == anchor:
+            return
+        param_items = self._select_teacher_snapshot_params(model)
+        snapshot: Dict[str, torch.Tensor] = {}
+        with torch.no_grad():
+            for name, param in param_items:
+                snapshot[name] = param.detach().cpu().clone()
+        self._teacher_snapshot_state = snapshot
+        self._teacher_snapshot_step = anchor
+
+    def _teacher_forward_with_periodic_snapshot(
+        self,
+        model_for_teacher,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        logits_to_keep: int,
+    ):
+        if self.teacher_update_interval_steps <= 0:
+            adapter_ctx = nullcontext()
+            if self.fixed_teacher and hasattr(model_for_teacher, "disable_adapter"):
+                adapter_ctx = model_for_teacher.disable_adapter()
+            with torch.no_grad(), adapter_ctx:
+                return self._get_per_token_logps_and_entropies(
+                    model_for_teacher,
+                    input_ids,
+                    attention_mask,
+                    logits_to_keep,
+                )
+
+        self._refresh_teacher_snapshot_if_needed(model_for_teacher)
+        snapshot = self._teacher_snapshot_state or {}
+        if not snapshot:
+            with torch.no_grad():
+                return self._get_per_token_logps_and_entropies(
+                    model_for_teacher,
+                    input_ids,
+                    attention_mask,
+                    logits_to_keep,
+                )
+
+        param_by_name = dict(model_for_teacher.named_parameters())
+        restore_state: Dict[str, torch.Tensor] = {}
+        with torch.no_grad():
+            for name, teacher_tensor in snapshot.items():
+                param = param_by_name.get(name)
+                if param is None:
+                    continue
+                restore_state[name] = param.detach().clone()
+                param.copy_(teacher_tensor.to(device=param.device, dtype=param.dtype))
+            try:
+                return self._get_per_token_logps_and_entropies(
+                    model_for_teacher,
+                    input_ids,
+                    attention_mask,
+                    logits_to_keep,
+                )
+            finally:
+                for name, student_tensor in restore_state.items():
+                    param = param_by_name.get(name)
+                    if param is not None:
+                        param.copy_(student_tensor)
+
     def _compute_student_logps(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         old_per_token_logps = batch.get("old_per_token_logps")
         if old_per_token_logps is not None:
@@ -278,21 +369,13 @@ class RLSDTrainer(GRPOTrainer):
         teacher_attention_mask = torch.cat([prefix_mask, completion_mask.long()], dim=1)
         logits_to_keep = completion_ids.size(1)
 
-        model_for_teacher = self.model
-        adapter_ctx = nullcontext()
-        if self.fixed_teacher:
-            unwrapped = self.accelerator.unwrap_model(self.model)
-            if hasattr(unwrapped, "disable_adapter"):
-                model_for_teacher = unwrapped
-                adapter_ctx = unwrapped.disable_adapter()
-
-        with torch.no_grad(), adapter_ctx:
-            output = self._get_per_token_logps_and_entropies(
-                model_for_teacher,
-                teacher_input_ids,
-                teacher_attention_mask,
-                logits_to_keep,
-            )
+        model_for_teacher = self._unwrap_model_for_teacher()
+        output = self._teacher_forward_with_periodic_snapshot(
+            model_for_teacher=model_for_teacher,
+            input_ids=teacher_input_ids,
+            attention_mask=teacher_attention_mask,
+            logits_to_keep=logits_to_keep,
+        )
         return self._extract_logps(output).detach()
 
     def _rollout_mask(self, seq_advantages: torch.Tensor) -> torch.Tensor:

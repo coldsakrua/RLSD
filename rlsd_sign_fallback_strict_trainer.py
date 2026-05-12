@@ -1,5 +1,4 @@
 import re
-from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -179,37 +178,11 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         completion_mask: torch.Tensor,
         teacher_prompts: Sequence[str],
     ) -> torch.Tensor:
-        tokenizer = self._get_tokenizer()
-        device = completion_ids.device
-        original_padding_side = getattr(tokenizer, "padding_side", "right")
-        tokenizer.padding_side = "left"
-        encoded = tokenizer(
-            list(teacher_prompts),
-            padding=True,
-            return_tensors="pt",
-            add_special_tokens=False,
+        return super()._compute_teacher_logps(
+            completion_ids=completion_ids,
+            completion_mask=completion_mask,
+            teacher_prompts=teacher_prompts,
         )
-        tokenizer.padding_side = original_padding_side
-
-        prefix_ids = encoded["input_ids"].to(device)
-        prefix_mask = encoded["attention_mask"].to(device)
-        input_ids = torch.cat([prefix_ids, completion_ids], dim=1)
-        attention_mask = torch.cat([prefix_mask, completion_mask.long()], dim=1)
-        logits_to_keep = completion_ids.size(1)
-
-        model_for_teacher = self.model
-        adapter_ctx = nullcontext()
-        if self.fixed_teacher:
-            unwrapped = self.accelerator.unwrap_model(self.model)
-            if hasattr(unwrapped, "disable_adapter"):
-                model_for_teacher = unwrapped
-                adapter_ctx = unwrapped.disable_adapter()
-
-        with torch.no_grad(), adapter_ctx:
-            out = self._get_per_token_logps_and_entropies(
-                model_for_teacher, input_ids, attention_mask, logits_to_keep
-            )
-        return out[0].detach() if isinstance(out, tuple) else out.detach()
 
     def _generate_and_score_completions(self, inputs):
         # Call the parent class of RLSDTrainer directly to avoid reusing its weighting logic.
