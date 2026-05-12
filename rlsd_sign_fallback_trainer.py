@@ -2,6 +2,7 @@ import re
 from typing import Any, Dict, List, Sequence
 
 import torch
+from trl import GRPOTrainer
 
 from reward_fn import verifiable_math_reward
 from rlsd_trainer import RLSDTrainer
@@ -180,7 +181,9 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         return weights
 
     def _generate_and_score_completions(self, inputs):
-        batch = super()._generate_and_score_completions(inputs)
+        # Avoid running RLSDTrainer weighting first (which would duplicate teacher/student
+        # log-prob computation and increase memory). Start from plain GRPO outputs.
+        batch = GRPOTrainer._generate_and_score_completions(self, inputs)
 
         seq_advantages = batch["advantages"]
         if seq_advantages.dim() != 1:
