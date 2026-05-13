@@ -31,6 +31,15 @@ JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
 
+# W&B: metrics go to ${OUTPUT_DIR}/wandb/ (default offline, no API traffic on compute nodes).
+# After training, on a node with Internet and `wandb login`: unset WANDB_MODE && wandb sync "${OUTPUT_DIR}/wandb/offline-run-*"
+# To fully disable W&B: export DISABLE_WANDB=true before sbatch.
+DISABLE_WANDB="${DISABLE_WANDB:-false}"
+export WANDB_MODE="${WANDB_MODE:-offline}"
+export WANDB_DIR="${OUTPUT_DIR}"
+export WANDB_DATA_DIR="${OUTPUT_DIR}/.wandb_data"
+mkdir -p "${WANDB_DATA_DIR}"
+
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
 PER_DEVICE_BS=${PER_DEVICE_BS:-2}
@@ -73,6 +82,9 @@ else
 fi
 
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
+# DAPO-style ratio clip: ε_low / ε_high (TRL: --epsilon, --epsilon_high). Override via env before sbatch.
+DAPO_EPSILON=${DAPO_EPSILON:-0.2}
+DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.28}
 VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.9}
 TEMPERATURE=${TEMPERATURE:-0.7}
 TOP_P=${TOP_P:-0.95}
@@ -166,11 +178,13 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --num_generations "${NUM_GENERATIONS}" \
     --max_completion_length "${MAX_COMPLETION_LENGTH}" \
     --save_steps 25 \
-    --logging_steps 2 \
+    --logging_steps 1 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
     --max_length "${MAX_LENGTH}" \
     --beta 0 \
+    --epsilon "${DAPO_EPSILON}" \
+    --epsilon_high "${DAPO_EPSILON_HIGH}" \
     --use_vllm \
     --vllm_mode server \
     --vllm_server_base_url "${VLLM_SERVER_BASE_URL}" \
@@ -199,5 +213,5 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
     --save_rollout_snapshots "${SAVE_ROLLOUT_SNAPSHOTS}" \
     --rollout_snapshot_interval_steps "${ROLLOUT_SNAPSHOT_INTERVAL_STEPS}" \
-    --disable_wandb true \
+    --disable_wandb "${DISABLE_WANDB}" \
     --gradient_checkpointing

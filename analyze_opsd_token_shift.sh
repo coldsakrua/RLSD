@@ -32,7 +32,7 @@ RUN_TAG=${RUN_TAG:-${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}}
 OUTPUT_JSON=${OUTPUT_JSON:-${OUTPUT_DIR}/opsd_token_shift_${RUN_TAG}.json}
 mkdir -p "${OUTPUT_DIR}"
 
-SAMPLE_SIZE=${SAMPLE_SIZE:-4}
+SAMPLE_SIZE=${SAMPLE_SIZE:-32}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 SEED=${SEED:-42}
 
@@ -63,10 +63,14 @@ REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
 ENABLE_THINKING=${ENABLE_THINKING:-false}
 SUMMARY_TOP_K=${SUMMARY_TOP_K:-30}
 
+# Prompts per model.generate() call (left-padded batch).
+BATCH_SIZE=${BATCH_SIZE:-4}
+
 echo "[analyze] model=${MODEL_PATH}"
 echo "[analyze] lora=${LORA_PATH:-<none>}"
 echo "[analyze] dataset=${DATASET_PATH} split=${DATASET_SPLIT}"
 echo "[analyze] output_json=${OUTPUT_JSON}"
+echo "[analyze] batch_size=${BATCH_SIZE}"
 echo "[env] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>} SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-<unset>} SLURM_STEP_GPUS=${SLURM_STEP_GPUS:-<unset>}"
 
 python analyze_opsd_token_shift.py \
@@ -100,4 +104,5 @@ python analyze_opsd_token_shift.py \
     --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
     --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
     --enable_thinking "${ENABLE_THINKING}" \
-    --summary_top_k "${SUMMARY_TOP_K}"
+    --summary_top_k "${SUMMARY_TOP_K}" \
+    --batch_size "${BATCH_SIZE}"

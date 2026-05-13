@@ -218,6 +218,136 @@ def _compute_completion_token_logps(
     return gathered[-comp_len:].detach().cpu()
 
 
+def _trim_completion_token_ids(comp_ids: torch.Tensor, *, tokenizer) -> torch.Tensor:
+    """Trim at first EOS (inclusive) and strip trailing pads; matches rollout decoding in main()."""
+    comp_ids = comp_ids.clone()
+    eos_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id
+    if eos_id is not None:
+        eos_pos = (comp_ids == int(eos_id)).nonzero(as_tuple=False)
+        if eos_pos.numel() > 0:
+            cut = int(eos_pos[0].item()) + 1
+            comp_ids = comp_ids[:cut]
+    if pad_id is not None and (eos_id is None or int(pad_id) != int(eos_id)):
+        pad_pos = (comp_ids == int(pad_id)).nonzero(as_tuple=False)
+        if pad_pos.numel() > 0:
+            cut = int(pad_pos[0].item())
+            comp_ids = comp_ids[:cut]
+    return comp_ids
+
+
+def _record_opsd_trajectories_for_prompt(
+    *,
+    sample_pos: int,
+    dataset_index: int,
+    row: Dict[str, Any],
+    prompt_ids: torch.Tensor,
+    rollout_prompt_text: str,
+    teacher_prompt_text: str,
+    completion_ids_list: List[torch.Tensor],
+    completion_list: List[str],
+    model,
+    tokenizer,
+    resolved_device: str,
+    args: argparse.Namespace,
+    all_traj_records: List[Dict[str, Any]],
+    all_token_rows: List[Dict[str, Any]],
+    all_correct_token_rows: List[Dict[str, Any]],
+    all_wrong_token_rows: List[Dict[str, Any]],
+    traj_summaries: List[TrajSummary],
+) -> None:
+    solution = str(row.get("solution", ""))
+    prompt_obj = row.get("prompt", "")
+    rewards = verifiable_math_reward(completion_list, [solution] * len(completion_list))
+    rewards = [float(r) for r in rewards]
+    correctness = [bool(r > float(args.reward_binary_threshold)) for r in rewards]
+
+    teacher_prefix_ids = tokenizer(
+        teacher_prompt_text,
+        return_tensors="pt",
+        add_special_tokens=False,
+        truncation=True,
+        max_length=int(args.max_teacher_prompt_length),
+    )["input_ids"][0].to(resolved_device)
+
+    for j, (comp_ids, comp_text, rew, ok) in enumerate(
+        zip(completion_ids_list, completion_list, rewards, correctness)
+    ):
+        if comp_ids.numel() == 0:
+            continue
+        comp_ids = comp_ids.to(resolved_device)
+        student_logps = _compute_completion_token_logps(
+            model,
+            prefix_ids=prompt_ids,
+            completion_ids=comp_ids,
+        )
+        teacher_logps = _compute_completion_token_logps(
+            model,
+            prefix_ids=teacher_prefix_ids,
+            completion_ids=comp_ids,
+        )
+        token_ids = comp_ids.detach().cpu().tolist()
+        token_texts = [
+            tokenizer.decode([int(tid)], skip_special_tokens=False, clean_up_tokenization_spaces=False)
+            for tid in token_ids
+        ]
+
+        per_tok: List[Dict[str, Any]] = []
+        for k, (tid, ttxt, s_lp, t_lp) in enumerate(
+            zip(token_ids, token_texts, student_logps.tolist(), teacher_logps.tolist())
+        ):
+            s_lp = float(s_lp)
+            t_lp = float(t_lp)
+            d_lp = t_lp - s_lp
+            s_p = float(math.exp(max(-80.0, min(20.0, s_lp))))
+            t_p = float(math.exp(max(-80.0, min(20.0, t_lp))))
+            d_p = t_p - s_p
+            direction = "up" if d_lp > 0 else ("down" if d_lp < 0 else "same")
+            row_tok = {
+                "token_pos": int(k),
+                "token_id": int(tid),
+                "token": ttxt,
+                "student_logp": s_lp,
+                "teacher_logp": t_lp,
+                "delta_logp": d_lp,
+                "student_prob": s_p,
+                "teacher_prob": t_p,
+                "delta_prob": d_p,
+                "prob_ratio_teacher_over_student": float(math.exp(max(-40.0, min(40.0, d_lp)))),
+                "direction": direction,
+            }
+            per_tok.append(row_tok)
+            all_token_rows.append(row_tok)
+            if ok:
+                all_correct_token_rows.append(row_tok)
+            else:
+                all_wrong_token_rows.append(row_tok)
+
+        traj = {
+            "sample_pos": int(sample_pos),
+            "dataset_index": int(dataset_index),
+            "completion_idx": int(j),
+            "reward": float(rew),
+            "correct": bool(ok),
+            "solution": solution,
+            "prompt_raw": _safe_jsonable(prompt_obj),
+            "prompt_for_generation_text": rollout_prompt_text,
+            "teacher_prompt_text": teacher_prompt_text,
+            "completion_text": comp_text,
+            "tokens": per_tok,
+        }
+        all_traj_records.append(traj)
+        traj_summaries.append(
+            TrajSummary(
+                sample_idx=int(dataset_index),
+                completion_idx=int(j),
+                reward=float(rew),
+                correct=bool(ok),
+                completion_text=comp_text,
+            )
+        )
+
+
 def _sample_dataset_indices(n: int, k: int, seed: int) -> List[int]:
     if n <= 0:
         return []
@@ -335,6 +465,12 @@ def main():
         default="{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n",
     )
     parser.add_argument("--summary_top_k", type=int, default=30)
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Number of prompts to run through model.generate() at once (left-padded).",
+    )
     args = parser.parse_args()
 
     if args.dataset_cache_dir:
@@ -412,178 +548,127 @@ def main():
     all_wrong_token_rows: List[Dict[str, Any]] = []
     traj_summaries: List[TrajSummary] = []
 
-    for sample_pos, row in enumerate(rows):
-        prompt_obj = row.get("prompt", "")
-        solution = str(row.get("solution", ""))
-
-        rollout_prompt_text = _prompt_to_generation_text(
-            tokenizer,
-            prompt_obj,
-            enable_thinking=bool(args.enable_thinking),
-        )
-        teacher_prompt_text = args.teacher_prompt_template.format(
-            prompt=_prompt_to_teacher_text(prompt_obj),
-            solution=solution,
-        )
-
-        prompt_ids = tokenizer(
-            rollout_prompt_text,
-            return_tensors="pt",
-            add_special_tokens=False,
-            truncation=True,
-            max_length=int(args.max_prompt_length),
-        )["input_ids"][0].to(resolved_device)
-
-        gen_kwargs = dict(
-            max_new_tokens=int(args.max_new_tokens),
-            do_sample=bool(args.do_sample),
-            temperature=float(args.temperature),
-            top_p=float(args.top_p),
-            repetition_penalty=float(args.repetition_penalty),
-            num_return_sequences=int(args.num_generations),
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            use_cache=True,
-        )
-        if int(args.top_k) > 0:
-            gen_kwargs["top_k"] = int(args.top_k)
-        if float(args.min_p) > 0.0:
-            gen_kwargs["min_p"] = float(args.min_p)
-        if float(args.presence_penalty) != 0.0:
-            # Transformers generate() does not natively expose presence_penalty for all models.
-            # Keep this as metadata only to match CLI intent.
-            pass
-
-        with torch.no_grad():
-            try:
-                outputs = model.generate(
-                    input_ids=prompt_ids.unsqueeze(0),
-                    attention_mask=torch.ones_like(prompt_ids.unsqueeze(0)),
-                    **gen_kwargs,
+    batch_size = max(1, int(args.batch_size))
+    num_gen = int(args.num_generations)
+    old_padding_side = getattr(tokenizer, "padding_side", "right")
+    tokenizer.padding_side = "left"
+    try:
+        for chunk_start in range(0, len(rows), batch_size):
+            chunk = rows[chunk_start : chunk_start + batch_size]
+            rollout_texts: List[str] = []
+            teacher_texts: List[str] = []
+            for row in chunk:
+                prompt_obj = row.get("prompt", "")
+                solution = str(row.get("solution", ""))
+                rollout_texts.append(
+                    _prompt_to_generation_text(
+                        tokenizer,
+                        prompt_obj,
+                        enable_thinking=bool(args.enable_thinking),
+                    )
                 )
-            except TypeError:
-                # Backward-compatible fallback for older Transformers that do not support min_p.
-                gen_kwargs.pop("min_p", None)
-                outputs = model.generate(
-                    input_ids=prompt_ids.unsqueeze(0),
-                    attention_mask=torch.ones_like(prompt_ids.unsqueeze(0)),
-                    **gen_kwargs,
+                teacher_texts.append(
+                    args.teacher_prompt_template.format(
+                        prompt=_prompt_to_teacher_text(prompt_obj),
+                        solution=solution,
+                    )
                 )
-        # [num_generations, prompt_len + new_len]
-        if outputs.dim() != 2:
-            raise RuntimeError(f"Unexpected generate output shape: {tuple(outputs.shape)}")
 
-        prompt_len = int(prompt_ids.numel())
-        completion_list: List[str] = []
-        completion_ids_list: List[torch.Tensor] = []
-        for seq in outputs:
-            comp_ids = seq[prompt_len:]
-            eos_id = tokenizer.eos_token_id
-            pad_id = tokenizer.pad_token_id
-            # Keep through first EOS (inclusive), matching rollout decoding semantics.
-            if eos_id is not None:
-                eos_pos = (comp_ids == int(eos_id)).nonzero(as_tuple=False)
-                if eos_pos.numel() > 0:
-                    cut = int(eos_pos[0].item()) + 1
-                    comp_ids = comp_ids[:cut]
-            # If pad != eos, strip trailing pad area.
-            if pad_id is not None and (eos_id is None or int(pad_id) != int(eos_id)):
-                pad_pos = (comp_ids == int(pad_id)).nonzero(as_tuple=False)
-                if pad_pos.numel() > 0:
-                    cut = int(pad_pos[0].item())
-                    comp_ids = comp_ids[:cut]
-            comp_ids = comp_ids.to(resolved_device)
-            completion_ids_list.append(comp_ids)
-            completion_list.append(tokenizer.decode(comp_ids.tolist(), skip_special_tokens=True))
-
-        rewards = verifiable_math_reward(completion_list, [solution] * len(completion_list))
-        rewards = [float(r) for r in rewards]
-        correctness = [bool(r > float(args.reward_binary_threshold)) for r in rewards]
-
-        teacher_prefix_ids = tokenizer(
-            teacher_prompt_text,
-            return_tensors="pt",
-            add_special_tokens=False,
-            truncation=True,
-            max_length=int(args.max_teacher_prompt_length),
-        )["input_ids"][0].to(resolved_device)
-
-        for j, (comp_ids, comp_text, rew, ok) in enumerate(
-            zip(completion_ids_list, completion_list, rewards, correctness)
-        ):
-            if comp_ids.numel() == 0:
-                continue
-            student_logps = _compute_completion_token_logps(
-                model,
-                prefix_ids=prompt_ids,
-                completion_ids=comp_ids,
+            batch_tok = tokenizer(
+                rollout_texts,
+                return_tensors="pt",
+                add_special_tokens=False,
+                truncation=True,
+                max_length=int(args.max_prompt_length),
+                padding=True,
             )
-            teacher_logps = _compute_completion_token_logps(
-                model,
-                prefix_ids=teacher_prefix_ids,
-                completion_ids=comp_ids,
+            input_ids = batch_tok["input_ids"].to(resolved_device)
+            attention_mask = batch_tok["attention_mask"].to(resolved_device)
+            padded_len = int(input_ids.shape[1])
+
+            gen_kwargs = dict(
+                max_new_tokens=int(args.max_new_tokens),
+                do_sample=bool(args.do_sample),
+                temperature=float(args.temperature),
+                top_p=float(args.top_p),
+                repetition_penalty=float(args.repetition_penalty),
+                num_return_sequences=num_gen,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                use_cache=True,
             )
-            token_ids = comp_ids.detach().cpu().tolist()
-            token_texts = [
-                tokenizer.decode([int(tid)], skip_special_tokens=False, clean_up_tokenization_spaces=False)
-                for tid in token_ids
-            ]
+            if int(args.top_k) > 0:
+                gen_kwargs["top_k"] = int(args.top_k)
+            if float(args.min_p) > 0.0:
+                gen_kwargs["min_p"] = float(args.min_p)
+            if float(args.presence_penalty) != 0.0:
+                pass
 
-            per_tok: List[Dict[str, Any]] = []
-            for k, (tid, ttxt, s_lp, t_lp) in enumerate(
-                zip(token_ids, token_texts, student_logps.tolist(), teacher_logps.tolist())
-            ):
-                s_lp = float(s_lp)
-                t_lp = float(t_lp)
-                d_lp = t_lp - s_lp
-                # Clamp exp inputs for numerical stability.
-                s_p = float(math.exp(max(-80.0, min(20.0, s_lp))))
-                t_p = float(math.exp(max(-80.0, min(20.0, t_lp))))
-                d_p = t_p - s_p
-                direction = "up" if d_lp > 0 else ("down" if d_lp < 0 else "same")
-                row_tok = {
-                    "token_pos": int(k),
-                    "token_id": int(tid),
-                    "token": ttxt,
-                    "student_logp": s_lp,
-                    "teacher_logp": t_lp,
-                    "delta_logp": d_lp,
-                    "student_prob": s_p,
-                    "teacher_prob": t_p,
-                    "delta_prob": d_p,
-                    "prob_ratio_teacher_over_student": float(math.exp(max(-40.0, min(40.0, d_lp)))),
-                    "direction": direction,
-                }
-                per_tok.append(row_tok)
-                all_token_rows.append(row_tok)
-                if ok:
-                    all_correct_token_rows.append(row_tok)
-                else:
-                    all_wrong_token_rows.append(row_tok)
+            with torch.no_grad():
+                try:
+                    outputs = model.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        **gen_kwargs,
+                    )
+                except TypeError:
+                    gen_kwargs.pop("min_p", None)
+                    outputs = model.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        **gen_kwargs,
+                    )
 
-            traj = {
-                "sample_pos": int(sample_pos),
-                "dataset_index": int(chosen_indices[sample_pos]),
-                "completion_idx": int(j),
-                "reward": float(rew),
-                "correct": bool(ok),
-                "solution": solution,
-                "prompt_raw": _safe_jsonable(prompt_obj),
-                "prompt_for_generation_text": rollout_prompt_text,
-                "teacher_prompt_text": teacher_prompt_text,
-                "completion_text": comp_text,
-                "tokens": per_tok,
-            }
-            all_traj_records.append(traj)
-            traj_summaries.append(
-                TrajSummary(
-                    sample_idx=int(chosen_indices[sample_pos]),
-                    completion_idx=int(j),
-                    reward=float(rew),
-                    correct=bool(ok),
-                    completion_text=comp_text,
+            if outputs.dim() != 2:
+                raise RuntimeError(f"Unexpected generate output shape: {tuple(outputs.shape)}")
+            bsz = len(chunk)
+            if int(outputs.shape[0]) != bsz * num_gen:
+                raise RuntimeError(
+                    f"Expected generate batch dim {bsz * num_gen}, got {int(outputs.shape[0])}"
                 )
-            )
+
+            for b in range(bsz):
+                sample_pos = chunk_start + b
+                row = chunk[b]
+                prompt_ids = input_ids[b].contiguous()
+                rollout_prompt_text = rollout_texts[b]
+                teacher_prompt_text = teacher_texts[b]
+
+                completion_ids_list: List[torch.Tensor] = []
+                completion_list: List[str] = []
+                for j in range(num_gen):
+                    flat = b * num_gen + j
+                    seq = outputs[flat]
+                    comp_ids = _trim_completion_token_ids(
+                        seq[padded_len:].clone(),
+                        tokenizer=tokenizer,
+                    )
+                    completion_ids_list.append(comp_ids)
+                    completion_list.append(
+                        tokenizer.decode(comp_ids.tolist(), skip_special_tokens=True)
+                    )
+
+                _record_opsd_trajectories_for_prompt(
+                    sample_pos=sample_pos,
+                    dataset_index=int(chosen_indices[sample_pos]),
+                    row=row,
+                    prompt_ids=prompt_ids,
+                    rollout_prompt_text=rollout_prompt_text,
+                    teacher_prompt_text=teacher_prompt_text,
+                    completion_ids_list=completion_ids_list,
+                    completion_list=completion_list,
+                    model=model,
+                    tokenizer=tokenizer,
+                    resolved_device=resolved_device,
+                    args=args,
+                    all_traj_records=all_traj_records,
+                    all_token_rows=all_token_rows,
+                    all_correct_token_rows=all_correct_token_rows,
+                    all_wrong_token_rows=all_wrong_token_rows,
+                    traj_summaries=traj_summaries,
+                )
+    finally:
+        tokenizer.padding_side = old_padding_side
 
     correct_count = sum(1 for x in traj_summaries if x.correct)
     total_count = len(traj_summaries)
@@ -633,6 +718,7 @@ def main():
             "use_dapo_raw_prompt": bool(args.use_dapo_raw_prompt),
             "prompt_prefix": args.prompt_prefix,
             "prompt_suffix": args.prompt_suffix,
+            "batch_size": int(batch_size),
         },
         "chosen_dataset_indices": chosen_indices,
         "summary": summary,

@@ -225,6 +225,14 @@ def main():
     if script_args.disable_wandb:
         os.environ["WANDB_DISABLED"] = "true"
         training_args.report_to = []
+    else:
+        os.environ.setdefault("WANDB_MODE", "offline")
+        out_dir = training_args.output_dir
+        if out_dir:
+            os.environ.setdefault("WANDB_DIR", out_dir)
+            _wandb_data = os.path.join(out_dir, ".wandb_data")
+            os.makedirs(_wandb_data, exist_ok=True)
+            os.environ.setdefault("WANDB_DATA_DIR", _wandb_data)
     if script_args.run_config:
         training_args.run_name = script_args.run_config
 

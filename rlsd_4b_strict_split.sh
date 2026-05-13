@@ -33,6 +33,15 @@ JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
 
+# W&B: metrics go to ${OUTPUT_DIR}/wandb/ (default offline, no API traffic on compute nodes).
+# After training, on a node with Internet and `wandb login`: unset WANDB_MODE && wandb sync "${OUTPUT_DIR}/wandb/offline-run-*"
+# To fully disable W&B: export DISABLE_WANDB=true before sbatch.
+DISABLE_WANDB="${DISABLE_WANDB:-false}"
+export WANDB_MODE="${WANDB_MODE:-offline}"
+export WANDB_DIR="${OUTPUT_DIR}"
+export WANDB_DATA_DIR="${OUTPUT_DIR}/.wandb_data"
+mkdir -p "${WANDB_DATA_DIR}"
+
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
 PER_DEVICE_BS=${PER_DEVICE_BS:-2}
@@ -124,8 +133,8 @@ DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}
 REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
 SAVE_ROLLOUT_SNAPSHOTS=${SAVE_ROLLOUT_SNAPSHOTS:-true}
 ROLLOUT_SNAPSHOT_INTERVAL_STEPS=${ROLLOUT_SNAPSHOT_INTERVAL_STEPS:-10}
-DAPO_EPSILON=${DAPO_EPSILON:-0.1}
-DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.2}
+DAPO_EPSILON=${DAPO_EPSILON:-0.2}
+DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.28}
 
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"q_proj k_proj v_proj o_proj gate_proj up_proj down_proj"}
 LORA_R=${LORA_R:-64}
@@ -190,7 +199,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --num_generations "${NUM_GENERATIONS}" \
     --max_completion_length "${MAX_COMPLETION_LENGTH}" \
     --save_steps 25 \
-    --logging_steps 2 \
+    --logging_steps 1 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
     --max_length "${MAX_LENGTH}" \
@@ -243,5 +252,5 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --rollout_snapshot_interval_steps "${ROLLOUT_SNAPSHOT_INTERVAL_STEPS}" \
     --epsilon "${DAPO_EPSILON}" \
     --dapo_epsilon_high "${DAPO_EPSILON_HIGH}" \
-    --disable_wandb true \
+    --disable_wandb "${DISABLE_WANDB}" \
     --gradient_checkpointing

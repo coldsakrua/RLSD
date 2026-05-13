@@ -455,11 +455,16 @@ class RLSDTrainer(GRPOTrainer):
             input_ids,
             attention_mask,
             logits_to_keep,
+            compute_entropy=True,
+            pixel_values=inputs.get("pixel_values"),
+            image_grid_thw=inputs.get("image_grid_thw"),
+            pixel_attention_mask=inputs.get("pixel_attention_mask"),
+            image_sizes=inputs.get("image_sizes"),
         )
         if isinstance(output, tuple):
-            per_token_logps, _ = output
+            per_token_logps, entropies = output
         else:
-            per_token_logps = output
+            per_token_logps, entropies = output, None
 
         ref_per_token_logps = inputs.get("ref_per_token_logps")
         if ref_per_token_logps is not None:
@@ -555,4 +560,16 @@ class RLSDTrainer(GRPOTrainer):
         self._metrics[mode]["clip_ratio"].append(
             float(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
         )
+        if entropies is not None:
+            completion_token_count = completion_mask.sum().clamp(min=1.0)
+
+            def masked_batch_mean(x):
+                if x.shape[1] == 1:
+                    return x.mean()
+                return (x * completion_mask).sum() / completion_token_count
+
+            mean_entropy = masked_batch_mean(entropies)
+            self._metrics[mode]["entropy"].append(
+                float(self.accelerator.gather(mean_entropy).nanmean().item())
+            )
         return loss
