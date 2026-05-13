@@ -1,11 +1,10 @@
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Optional
 
 from peft import LoraConfig, TaskType
-from transformers import AutoTokenizer, HfArgumentParser, TrainerCallback
+from transformers import AutoTokenizer, HfArgumentParser
 from trl import GRPOConfig, GRPOTrainer
 
 from data_utils import (
@@ -19,6 +18,7 @@ from reward_fn import (
     verifiable_math_reward,
     verifiable_math_reward_with_format_penalties,
 )
+from run_logging import StructuredJsonMetricsCallback, configure_wandb_offline
 
 
 @dataclass
@@ -154,44 +154,19 @@ def enforce_lora_only_trainable(model) -> None:
         param.requires_grad_("lora_" in name.lower())
 
 
-class JsonMetricsCallback(TrainerCallback):
-    def __init__(self, jsonl_path: str):
-        self.jsonl_path = jsonl_path
-        os.makedirs(os.path.dirname(self.jsonl_path), exist_ok=True)
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        if not logs:
-            return
-        record = {
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "step": int(state.global_step),
-            "epoch": float(state.epoch) if state.epoch is not None else None,
-        }
-        record.update(logs)
-        with open(self.jsonl_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            f.flush()
-
-
 def main():
     parser = HfArgumentParser((ScriptArguments, GRPOConfig))
     script_args, training_args = parser.parse_args_into_dataclasses()
 
     if script_args.dataset_cache_dir:
         os.environ["HF_DATASETS_CACHE"] = script_args.dataset_cache_dir
-    if script_args.disable_wandb:
-        os.environ["WANDB_DISABLED"] = "true"
-        training_args.report_to = []
-    else:
-        os.environ.setdefault("WANDB_MODE", "offline")
-        out_dir = training_args.output_dir
-        if out_dir:
-            os.environ.setdefault("WANDB_DIR", out_dir)
-            _wandb_data = os.path.join(out_dir, ".wandb_data")
-            os.makedirs(_wandb_data, exist_ok=True)
-            os.environ.setdefault("WANDB_DATA_DIR", _wandb_data)
-    if script_args.run_config:
-        training_args.run_name = script_args.run_config
+    logging_setup = configure_wandb_offline(
+        training_args,
+        disable_wandb=bool(script_args.disable_wandb),
+        run_name=script_args.run_config if script_args.run_config else None,
+        extra_meta={"entrypoint": os.path.basename(__file__)},
+    )
+    print(f"[wandb] meta_path={logging_setup['meta_path']}", flush=True)
 
     training_args.remove_unused_columns = False
     if training_args.gradient_checkpointing and getattr(training_args, "gradient_checkpointing_kwargs", None) in (None, {}):
@@ -351,8 +326,8 @@ def main():
         peft_config=peft_config,
     )
 
-    metrics_jsonl_path = os.path.join(training_args.output_dir, "train_metrics.jsonl")
-    trainer.add_callback(JsonMetricsCallback(metrics_jsonl_path))
+    metrics_jsonl_path = logging_setup["metrics_jsonl_path"]
+    trainer.add_callback(StructuredJsonMetricsCallback(metrics_jsonl_path))
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
     if script_args.save_rollout_snapshots:
         print("[rollout_snapshot] skipped: plain GRPO trainer does not produce RLSD rollout snapshots.")

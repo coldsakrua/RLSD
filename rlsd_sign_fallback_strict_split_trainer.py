@@ -336,6 +336,19 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         )
         self._log_metric("strict_split/answer_weight_mean", float(answer_weights.mean().item()))
         self._log_metric("strict_split/adv_abs_mean", float((token_adv.abs() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()))
+        self._log_vector_stats("strict_split/seq_adv", seq_advantages)
+        self._log_masked_stats("strict_split/token_gap", g, completion_mask)
+        self._log_masked_stats("strict_split/w_pos", w_pos, completion_mask)
+        self._log_masked_stats("strict_split/w_down", w_down, completion_mask)
+        self._log_masked_stats("strict_split/token_adv", token_adv, completion_mask)
+        self._log_metric(
+            "strict_split/w_pos_gt1_frac",
+            float((((w_pos > 1.0).float() * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)).item()),
+        )
+        self._log_metric(
+            "strict_split/w_down_gt1_frac",
+            float((((w_down > 1.0).float() * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)).item()),
+        )
         self._stash_rollout_for_checkpoint(
             inputs,
             completion_ids,

@@ -315,6 +315,16 @@ class RLSDSignFallbackStrictTrainer(RLSDTrainer):
         self._log_metric("strict/completion_count_mixed", float(completion_count_mixed))
         self._log_metric("strict/answer_weight_mean", float(answer_weights.mean().item()))
         self._log_metric("strict/adv_abs_mean", float((token_adv.abs() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()))
+        self._log_vector_stats("strict/seq_adv", seq_advantages)
+        self._log_masked_stats("strict/token_gap", g, completion_mask)
+        self._log_masked_stats("strict/w_mixed", w_mixed, completion_mask)
+        self._log_masked_stats("strict/w_plus", w_plus, completion_mask)
+        self._log_masked_stats("strict/w_minus", w_minus, completion_mask)
+        self._log_masked_stats("strict/token_adv", token_adv, completion_mask)
+        self._log_metric(
+            "strict/w_mixed_gt1_frac",
+            float((((w_mixed > 1.0).float() * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)).item()),
+        )
         self._stash_rollout_for_checkpoint(
             inputs,
             completion_ids,

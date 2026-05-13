@@ -268,7 +268,7 @@ def patch_verl_compute_advantage():
             ref_log_prob = old_log_probs
         g = (ref_log_prob - old_log_probs).detach() * response_mask
 
-        jsd_clip = _env_float("RLSD_JSD_TOKEN_CLIP", 0.05)
+        jsd_clip = _env_float("RLSD_JSD_TOKEN_CLIP", 0.2)
         clip_low = 1.0 - jsd_clip
         clip_high = 1.0 + jsd_clip
         step = 0

@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+import math
 from typing import Any, Dict, List, Optional, Sequence
 
 import torch
@@ -231,6 +232,40 @@ class RLSDTrainer(GRPOTrainer):
             self._metrics[mode][key] = []
         self._metrics[mode][key].append(value)
 
+    def _reduce_scalar_mean(self, value: torch.Tensor | float) -> float:
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(float(value), device=self.accelerator.device)
+        value = value.detach().float().reshape(1)
+        return float(self.accelerator.gather_for_metrics(value).mean().item())
+
+    def _log_vector_stats(self, prefix: str, values: torch.Tensor) -> None:
+        if values.numel() == 0:
+            return
+        v = values.float()
+        mean = self._reduce_scalar_mean(v.mean())
+        sq_mean = self._reduce_scalar_mean((v * v).mean())
+        std = math.sqrt(max(0.0, sq_mean - mean * mean))
+        abs_mean = self._reduce_scalar_mean(v.abs().mean())
+        pos_frac = self._reduce_scalar_mean((v > 0).float().mean())
+        self._log_metric(f"{prefix}/mean", mean)
+        self._log_metric(f"{prefix}/std", std)
+        self._log_metric(f"{prefix}/abs_mean", abs_mean)
+        self._log_metric(f"{prefix}/pos_frac", pos_frac)
+
+    def _log_masked_stats(self, prefix: str, values: torch.Tensor, mask: torch.Tensor) -> None:
+        v = values.float()
+        m = mask.float()
+        denom = m.sum().clamp(min=1.0)
+        mean = self._reduce_scalar_mean((v * m).sum() / denom)
+        sq_mean = self._reduce_scalar_mean(((v * v) * m).sum() / denom)
+        std = math.sqrt(max(0.0, sq_mean - mean * mean))
+        abs_mean = self._reduce_scalar_mean((v.abs() * m).sum() / denom)
+        pos_frac = self._reduce_scalar_mean(((v > 0).float() * m).sum() / denom)
+        self._log_metric(f"{prefix}/mean", mean)
+        self._log_metric(f"{prefix}/std", std)
+        self._log_metric(f"{prefix}/abs_mean", abs_mean)
+        self._log_metric(f"{prefix}/pos_frac", pos_frac)
+
     def _build_teacher_prompts(self, inputs: Sequence[Dict[str, Any]]) -> List[str]:
         prompts: List[str] = []
         for row in inputs:
@@ -433,6 +468,16 @@ class RLSDTrainer(GRPOTrainer):
         batch["advantages"] = token_advantages
         self._log_metric("rlsd_lambda", lam)
         self._log_metric("rlsd_w_mean", float(token_weight.mean().item()))
+        self._log_metric("rlsd/lambda", float(lam))
+        self._log_metric("rlsd/rollout_kept_frac", float(rollout_mask.float().mean().item()))
+        self._log_vector_stats("rlsd/seq_adv", seq_advantages)
+        self._log_masked_stats("rlsd/token_delta", token_delta, completion_mask)
+        self._log_masked_stats("rlsd/token_weight", token_weight, completion_mask)
+        self._log_metric(
+            "rlsd/token_weight_gt1_frac",
+            float((((token_weight > 1.0).float() * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)).item()),
+        )
+        self._log_masked_stats("rlsd/token_adv", token_advantages, completion_mask)
         self._stash_rollout_for_checkpoint(
             inputs,
             completion_ids,
@@ -542,24 +587,34 @@ class RLSDTrainer(GRPOTrainer):
         mode = "train" if self.model.training else "eval"
         if mode not in self._metrics:
             self._metrics[mode] = {}
-        if "completion_length" not in self._metrics[mode]:
-            self._metrics[mode]["completion_length"] = []
-        self._metrics[mode]["completion_length"].append(
-            float(self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item())
-        )
-        if per_token_kl is not None and "kl" not in self._metrics[mode]:
-            self._metrics[mode]["kl"] = []
+        completion_length = float(self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item())
+        self._log_metric("completion_length", completion_length)
+        self._log_metric("rl/completion_length", completion_length)
         if per_token_kl is not None:
             mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1).clamp(min=1)).mean()
-            self._metrics[mode]["kl"].append(float(self.accelerator.gather_for_metrics(mean_kl).mean().item()))
+            kl_value = float(self.accelerator.gather_for_metrics(mean_kl).mean().item())
+            self._log_metric("kl", kl_value)
+            self._log_metric("rl/kl", kl_value)
 
         clip_ratio = (torch.abs(coef_1 - coef_2) > 1e-6).float()
-        if "clip_ratio" not in self._metrics[mode]:
-            self._metrics[mode]["clip_ratio"] = []
         clip_ratio = (clip_ratio * completion_mask).sum() / valid_token_count
-        self._metrics[mode]["clip_ratio"].append(
-            float(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
-        )
+        clip_ratio_value = float(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
+        self._log_metric("clip_ratio", clip_ratio_value)
+        self._log_metric("ppo/clip_ratio", clip_ratio_value)
+
+        ratio_mean = self._reduce_scalar_mean((coef_1 * completion_mask).sum() / valid_token_count)
+        ratio_sq_mean = self._reduce_scalar_mean(((coef_1 * coef_1) * completion_mask).sum() / valid_token_count)
+        ratio_std = math.sqrt(max(0.0, ratio_sq_mean - ratio_mean * ratio_mean))
+        self._log_metric("ppo/ratio_mean", ratio_mean)
+        self._log_metric("ppo/ratio_std", ratio_std)
+
+        adv_mean = self._reduce_scalar_mean((advantages * completion_mask).sum() / valid_token_count)
+        adv_abs_mean = self._reduce_scalar_mean((advantages.abs() * completion_mask).sum() / valid_token_count)
+        self._log_metric("adv/token_mean", adv_mean)
+        self._log_metric("adv/token_abs_mean", adv_abs_mean)
+
+        loss_token_mean = self._reduce_scalar_mean((per_token_loss * completion_mask).sum() / valid_token_count)
+        self._log_metric("ppo/token_loss_mean", loss_token_mean)
         if entropies is not None:
             completion_token_count = completion_mask.sum().clamp(min=1.0)
 
@@ -569,7 +624,7 @@ class RLSDTrainer(GRPOTrainer):
                 return (x * completion_mask).sum() / completion_token_count
 
             mean_entropy = masked_batch_mean(entropies)
-            self._metrics[mode]["entropy"].append(
-                float(self.accelerator.gather(mean_entropy).nanmean().item())
-            )
+            entropy_value = float(self.accelerator.gather(mean_entropy).nanmean().item())
+            self._log_metric("entropy", entropy_value)
+            self._log_metric("rl/entropy", entropy_value)
         return loss

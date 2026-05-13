@@ -279,6 +279,14 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
         self._log_metric("rlsd/group_all_wrong_frac", float(all_wrong_group.float().mean().item()))
         self._log_metric("rlsd/group_mixed_frac", float(mixed_group.float().mean().item()))
         self._log_metric("rlsd/answer_weight_mean", float(answer_weight_mask.mean().item()))
+        self._log_vector_stats("rlsd/seq_adv", seq_advantages)
+        self._log_masked_stats("rlsd/token_delta", token_delta, completion_mask)
+        self._log_masked_stats("rlsd/w_mixed", w_mixed, completion_mask)
+        self._log_masked_stats("rlsd/token_adv", token_advantages, completion_mask)
+        self._log_metric(
+            "rlsd/w_mixed_gt1_frac",
+            float((((w_mixed > 1.0).float() * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)).item()),
+        )
         self._stash_rollout_for_checkpoint(
             inputs,
             completion_ids,
