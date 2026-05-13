@@ -18,9 +18,10 @@ _TAIL_ANSWER_RE = re.compile(
 class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
     """
     Strict split OPSD variant:
-    - all-correct group + mixed-correct samples: positive OPSD log shaping
+    - all-correct group + mixed-correct samples: positive + negative shaping
+      (encourage with lambda_plus on up-gain tokens, suppress with lambda_minus on down-gain tokens)
     - all-wrong group + mixed-wrong samples: negative OPSD log shaping
-    - for wrong samples in mixed groups, keep only down-pressure
+    - wrong samples keep only down-pressure
     """
 
     def __init__(
@@ -235,9 +236,8 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         mixed = mixed_group.repeat_interleave(self.num_generations).unsqueeze(1)
 
         # Split mixed groups by correctness.
-        # One-sided keep rule:
-        # - correct: keep only OPSD gains that increase token prob vs rollout (w_pos > 1)
-        # - wrong: keep only OPSD gains that decrease token prob vs rollout (w_down > 1)
+        # Correct samples: dual-side rule (encourage up-gain, suppress down-gain).
+        # Wrong samples: down-pressure only.
         base_adv = seq_advantages.unsqueeze(1)
         base_mag = base_adv.abs()
         sample_correct = (rewards_binary > 0.5).unsqueeze(1)
@@ -245,32 +245,36 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         mixed_correct = mixed & sample_correct
         mixed_wrong = mixed & sample_wrong
 
+        lambda_plus_now = self._current_fallback_lambda(self.lambda_plus, self.lambda_plus_min)
+        lambda_minus_now = self._current_fallback_lambda(self.lambda_minus, self.lambda_minus_min)
         alpha_mixed = self._current_lambda()
         w_pos = torch.clamp(torch.exp(g), min=clip_low, max=clip_high)
         w_down = torch.clamp(torch.exp(-g), min=clip_low, max=clip_high)
         gain_pos = torch.relu(w_pos - 1.0)
         gain_down = torch.relu(w_down - 1.0)
+        down_active = gain_down > 0
 
-        mixed_pos_adv = base_mag * (1.0 + alpha_mixed * gain_pos)
-        mixed_neg_adv = -base_mag * (1.0 + alpha_mixed * gain_down)
+        mixed_pos_adv = base_mag * (1.0 + alpha_mixed * lambda_plus_now * gain_pos)
+        mixed_neg_adv = -base_mag * (1.0 + alpha_mixed * lambda_minus_now * gain_down)
+        mixed_correct_adv = torch.where(down_active, mixed_neg_adv, mixed_pos_adv)
         mixed_mask = self._rollout_mask(seq_advantages).unsqueeze(1)
-        mixed_pos_adv = torch.where(mixed_mask, mixed_pos_adv, base_adv)
+        mixed_correct_adv = torch.where(mixed_mask, mixed_correct_adv, base_adv)
         mixed_neg_adv = torch.where(mixed_mask, mixed_neg_adv, base_adv)
 
-        # all-correct: one-sided positive OPSD (keep only w_pos > 1 gains).
-        lambda_plus_now = self._current_fallback_lambda(self.lambda_plus, self.lambda_plus_min)
+        # all-correct: dual-side fallback.
         plus_base = torch.full_like(g, float(self.fallback_eps0)) * completion_mask
         plus_adv = plus_base * (1.0 + lambda_plus_now * gain_pos)
+        minus_on_correct = -plus_base * (1.0 + lambda_minus_now * gain_down)
+        all_correct_adv = torch.where(down_active, minus_on_correct, plus_adv)
 
-        # all-wrong: one-sided negative OPSD (keep only w_down > 1 gains).
-        lambda_minus_now = self._current_fallback_lambda(self.lambda_minus, self.lambda_minus_min)
+        # all-wrong: one-sided negative OPSD (down-pressure only).
         minus_base = -torch.full_like(g, float(self.fallback_eps0)) * completion_mask
         minus_adv = minus_base * (1.0 + lambda_minus_now * gain_down)
 
         token_adv = torch.zeros_like(base_adv)
-        token_adv = torch.where(all_correct, plus_adv, token_adv)
+        token_adv = torch.where(all_correct, all_correct_adv, token_adv)
         token_adv = torch.where(all_wrong, minus_adv, token_adv)
-        token_adv = torch.where(mixed_correct, mixed_pos_adv, token_adv)
+        token_adv = torch.where(mixed_correct, mixed_correct_adv, token_adv)
         token_adv = torch.where(mixed_wrong, mixed_neg_adv, token_adv)
 
         answer_weights = self._answer_weight_mask(
@@ -333,6 +337,13 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         self._log_metric(
             "strict_split/one_sided_gain_down_frac",
             float(((gain_down > 0).float() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()),
+        )
+        self._log_metric(
+            "strict_split/correct_down_apply_frac",
+            float(
+                (((down_active & sample_correct).float() * completion_mask).sum().item())
+                / completion_mask.sum().clamp(min=1).item()
+            ),
         )
         self._log_metric("strict_split/answer_weight_mean", float(answer_weights.mean().item()))
         self._log_metric("strict_split/adv_abs_mean", float((token_adv.abs() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()))
