@@ -47,7 +47,8 @@ REPETITION_PENALTY=${REPETITION_PENALTY:-1.0}
 PRESENCE_PENALTY=${PRESENCE_PENALTY:-0.2}
 
 TORCH_DTYPE=${TORCH_DTYPE:-bfloat16}
-DEVICE=${DEVICE:-cuda}
+DEVICE=${DEVICE:-auto}
+ALLOW_CPU_FALLBACK=${ALLOW_CPU_FALLBACK:-false}
 ATTN_IMPL=${ATTN_IMPL:-sdpa}
 
 # Match strict-style default prompt handling (raw DAPO passthrough).
@@ -66,6 +67,7 @@ echo "[analyze] model=${MODEL_PATH}"
 echo "[analyze] lora=${LORA_PATH:-<none>}"
 echo "[analyze] dataset=${DATASET_PATH} split=${DATASET_SPLIT}"
 echo "[analyze] output_json=${OUTPUT_JSON}"
+echo "[env] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>} SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-<unset>} SLURM_STEP_GPUS=${SLURM_STEP_GPUS:-<unset>}"
 
 python analyze_opsd_token_shift.py \
     --model_name_or_path "${MODEL_PATH}" \
@@ -88,6 +90,7 @@ python analyze_opsd_token_shift.py \
     --presence_penalty "${PRESENCE_PENALTY}" \
     --torch_dtype "${TORCH_DTYPE}" \
     --device "${DEVICE}" \
+    --allow_cpu_fallback "${ALLOW_CPU_FALLBACK}" \
     --attn_implementation "${ATTN_IMPL}" \
     --use_dapo_raw_prompt "${USE_DAPO_RAW_PROMPT}" \
     --normalize_math_prompt_to_standard_suffix "${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX}" \
@@ -98,4 +101,3 @@ python analyze_opsd_token_shift.py \
     --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
     --enable_thinking "${ENABLE_THINKING}" \
     --summary_top_k "${SUMMARY_TOP_K}"
-

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 from collections import defaultdict
 from dataclasses import dataclass
@@ -56,6 +57,31 @@ def _safe_jsonable(v: Any) -> Any:
     if isinstance(v, (list, tuple)):
         return [_safe_jsonable(x) for x in v]
     return str(v)
+
+
+def _cuda_probe() -> Tuple[bool, Dict[str, Any], Optional[str]]:
+    info: Dict[str, Any] = {
+        "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+        "SLURM_JOB_GPUS": os.environ.get("SLURM_JOB_GPUS", ""),
+        "SLURM_STEP_GPUS": os.environ.get("SLURM_STEP_GPUS", ""),
+    }
+    try:
+        avail = bool(torch.cuda.is_available())
+        info["torch_cuda_is_available"] = avail
+        count = int(torch.cuda.device_count()) if avail else 0
+        info["torch_cuda_device_count"] = count
+        if not avail or count <= 0:
+            return False, info, "No CUDA device visible to torch."
+        try:
+            cur = int(torch.cuda.current_device())
+            info["torch_cuda_current_device"] = cur
+            info["torch_cuda_current_name"] = torch.cuda.get_device_name(cur)
+        except Exception as e:  # noqa: PERF203
+            return False, info, f"cuda current_device/get_device_name failed: {e}"
+        return True, info, None
+    except Exception as e:  # noqa: PERF203
+        info["torch_cuda_is_available"] = "error"
+        return False, info, f"cuda probe exception: {e}"
 
 
 def apply_prompt_wrapping(prompt: Any, prefix: str, suffix: str) -> Any:
@@ -292,7 +318,8 @@ def main():
     parser.add_argument("--enable_thinking", type=_to_bool, default=False)
 
     parser.add_argument("--torch_dtype", type=str, default="bfloat16")
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--allow_cpu_fallback", type=_to_bool, default=False)
     parser.add_argument("--attn_implementation", type=str, default="sdpa")
 
     parser.add_argument("--prompt_prefix", type=str, default="")
@@ -318,6 +345,28 @@ def main():
     out_path = Path(args.output_json).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    requested_device = str(args.device).strip().lower()
+    resolved_device = requested_device
+    if requested_device == "auto":
+        resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if resolved_device.startswith("cuda"):
+        ok, info, err = _cuda_probe()
+        if not ok:
+            hint = (
+                "CUDA initialization failed. This is often a node/runtime issue "
+                "(e.g., bad GPU allocation or broken CUDA state). "
+                "Try requeueing the job or setting --device cpu / --allow_cpu_fallback true."
+            )
+            msg = f"{hint}\nprobe={json.dumps(_safe_jsonable(info), ensure_ascii=False)}\nreason={err}"
+            if bool(args.allow_cpu_fallback):
+                print(f"[warn] {msg}")
+                print("[warn] Falling back to CPU because --allow_cpu_fallback=true")
+                resolved_device = "cpu"
+            else:
+                raise RuntimeError(msg)
+    print(f"[device] requested={requested_device} resolved={resolved_device}")
+
     dtype = _resolve_dtype(args.torch_dtype)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -337,7 +386,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, **model_init_kwargs)
     if args.lora_path.strip():
         model = PeftModel.from_pretrained(model, args.lora_path.strip(), is_trainable=False)
-    model.to(args.device)
+    model.to(resolved_device)
     model.eval()
 
     ds = _build_train_like_dataset(
@@ -383,7 +432,7 @@ def main():
             add_special_tokens=False,
             truncation=True,
             max_length=int(args.max_prompt_length),
-        )["input_ids"][0].to(args.device)
+        )["input_ids"][0].to(resolved_device)
 
         gen_kwargs = dict(
             max_new_tokens=int(args.max_new_tokens),
@@ -443,7 +492,7 @@ def main():
                 if pad_pos.numel() > 0:
                     cut = int(pad_pos[0].item())
                     comp_ids = comp_ids[:cut]
-            comp_ids = comp_ids.to(args.device)
+            comp_ids = comp_ids.to(resolved_device)
             completion_ids_list.append(comp_ids)
             completion_list.append(tokenizer.decode(comp_ids.tolist(), skip_special_tokens=True))
 
@@ -457,7 +506,7 @@ def main():
             add_special_tokens=False,
             truncation=True,
             max_length=int(args.max_teacher_prompt_length),
-        )["input_ids"][0].to(args.device)
+        )["input_ids"][0].to(resolved_device)
 
         for j, (comp_ids, comp_text, rew, ok) in enumerate(
             zip(completion_ids_list, completion_list, rewards, correctness)
@@ -573,6 +622,8 @@ def main():
             "enable_thinking": bool(args.enable_thinking),
             "torch_dtype": args.torch_dtype,
             "device": args.device,
+            "resolved_device": resolved_device,
+            "allow_cpu_fallback": bool(args.allow_cpu_fallback),
             "attn_implementation": args.attn_implementation,
             "teacher_prompt_template": args.teacher_prompt_template,
             "reward_binary_threshold": float(args.reward_binary_threshold),
