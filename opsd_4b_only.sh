@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o logs/opsd_4b_pure.%j.out
+#SBATCH -o logs/opsd_4b_only.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
