@@ -5,7 +5,7 @@ from typing import Optional
 
 from peft import LoraConfig, TaskType
 from transformers import AutoTokenizer, HfArgumentParser
-from trl import GRPOConfig, GRPOTrainer
+from trl import GRPOConfig
 
 from data_utils import (
     DEFAULT_MATH_INSTRUCTION_SUFFIX,
@@ -13,6 +13,7 @@ from data_utils import (
     load_rlsd_dataset,
     normalize_prompt_to_standard_instruction,
 )
+from grpo_split_metrics_trainer import GRPOSplitMetricsTrainer
 from reward_fn import (
     configure_math_reward_extraction,
     verifiable_math_reward,
@@ -60,6 +61,7 @@ class ScriptArguments:
     reward_repeat_triplet_levenshtein_threshold: int = 0
     disable_thinking_in_chat_template: bool = True
     reward_boxed_last_token_fraction: float = 0.0
+    reward_binary_threshold: float = 0.5
 
 
 def _to_text_completion(completion) -> str:
@@ -317,13 +319,14 @@ def main():
 
     peft_config = build_peft_config(script_args)
 
-    trainer = GRPOTrainer(
+    trainer = GRPOSplitMetricsTrainer(
         model=script_args.model_name_or_path,
         reward_funcs=build_reward_fn(script_args),
         args=training_args,
         train_dataset=train_dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
+        reward_binary_threshold=script_args.reward_binary_threshold,
     )
 
     metrics_jsonl_path = logging_setup["metrics_jsonl_path"]
