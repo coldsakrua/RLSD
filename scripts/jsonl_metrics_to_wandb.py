@@ -20,6 +20,15 @@ def _is_loggable_scalar(v: Any) -> bool:
     return False
 
 
+def _wandb_key(key: str, *, train_prefix: str) -> str:
+    """Match HuggingFace Trainer + W&B: training scalars appear under train/* in the UI."""
+    if not train_prefix:
+        return key
+    if key.startswith(f"{train_prefix}/") or key.startswith("eval/"):
+        return key
+    return f"{train_prefix}/{key}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jsonl", required=True, help="Path to train_metrics.jsonl")
@@ -40,7 +49,19 @@ def main() -> None:
         default=None,
         help="Parent dir for ./wandb/ (default: cwd). Use a stable path so you can wandb sync it later.",
     )
+    parser.add_argument(
+        "--train-prefix",
+        default="train",
+        metavar="PREFIX",
+        help="Prefix keys so metrics show in W&B 'train' panel (default: train). Use '' to disable.",
+    )
+    parser.add_argument(
+        "--no-train-prefix",
+        action="store_true",
+        help="Log keys as in JSONL (charts-only layout); same as --train-prefix=''.",
+    )
     args = parser.parse_args()
+    train_prefix = "" if args.no_train_prefix else (args.train_prefix or "").strip()
 
     if args.offline:
         os.environ["WANDB_MODE"] = "offline"
@@ -79,7 +100,7 @@ def main() -> None:
                 if step is None:
                     continue
                 payload = {
-                    k: v
+                    _wandb_key(k, train_prefix=train_prefix): v
                     for k, v in rec.items()
                     if k not in ("timestamp_utc", "step") and _is_loggable_scalar(v)
                 }
