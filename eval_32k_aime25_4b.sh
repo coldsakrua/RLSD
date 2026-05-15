@@ -29,7 +29,7 @@ model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/q
 
 # Thinking mode ON by default
 NO_THINKING=${NO_THINKING:-1}
-datasets_csv=${DATASETS:-aime25,amo-bench,math500}
+datasets_csv=${DATASETS:-aime25,math500}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
 checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict_split_150step/job_1716801/checkpoint-300}}
