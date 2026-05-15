@@ -22,6 +22,7 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
       (encourage with lambda_plus on up-gain tokens, suppress with lambda_minus on down-gain tokens)
     - all-wrong group + mixed-wrong samples: negative OPSD log shaping
     - wrong samples keep only down-pressure
+    - with strict_split_mixed_only=True, all-correct/all-wrong groups are logged but receive zero feedback
     """
 
     def __init__(
@@ -39,6 +40,7 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         suppress_gt_shortcut: bool = True,
         reward_binary_threshold: float = 0.5,
         fallback_tail_tokens: int = 8,
+        strict_split_mixed_only: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -54,6 +56,7 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         self.suppress_gt_shortcut = bool(suppress_gt_shortcut)
         self.reward_binary_threshold = float(reward_binary_threshold)
         self.fallback_tail_tokens = int(fallback_tail_tokens)
+        self.strict_split_mixed_only = bool(strict_split_mixed_only)
 
     def _current_fallback_lambda(self, start: float, min_value: float) -> float:
         if self.fallback_decay_steps <= 0:
@@ -272,8 +275,9 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         minus_adv = minus_base * (1.0 + lambda_minus_now * gain_down)
 
         token_adv = torch.zeros_like(base_adv)
-        token_adv = torch.where(all_correct, all_correct_adv, token_adv)
-        token_adv = torch.where(all_wrong, minus_adv, token_adv)
+        if not self.strict_split_mixed_only:
+            token_adv = torch.where(all_correct, all_correct_adv, token_adv)
+            token_adv = torch.where(all_wrong, minus_adv, token_adv)
         token_adv = torch.where(mixed_correct, mixed_correct_adv, token_adv)
         token_adv = torch.where(mixed_wrong, mixed_neg_adv, token_adv)
 
@@ -312,8 +316,17 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         reward_mean_all_correct = _masked_mean(rewards_binary, sample_all_correct)
         reward_mean_all_wrong = _masked_mean(rewards_binary, sample_all_wrong)
         reward_mean_mixed = _masked_mean(rewards_binary, sample_mixed)
+        if self.strict_split_mixed_only:
+            no_feedback_group = all_correct_group | all_wrong_group
+            feedback_group = mixed_group
+        else:
+            no_feedback_group = torch.zeros_like(mixed_group)
+            feedback_group = torch.ones_like(mixed_group, dtype=torch.bool)
 
         self._log_metric("strict_split/mixed_alpha", alpha_mixed)
+        self._log_metric("strict_split/mixed_only", float(self.strict_split_mixed_only))
+        self._log_metric("strict_split/feedback_group_frac", float(feedback_group.float().mean().item()))
+        self._log_metric("strict_split/no_feedback_group_frac", float(no_feedback_group.float().mean().item()))
         self._log_metric("strict_split/lambda_plus", lambda_plus_now)
         self._log_metric("strict_split/lambda_minus", lambda_minus_now)
         self._log_metric("strict_split/group_all_correct_frac", float(all_correct_group.float().mean().item()))
