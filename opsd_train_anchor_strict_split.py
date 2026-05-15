@@ -40,10 +40,10 @@ class ScriptArguments:
     # normalizing to the standard boxed suffix template.
     use_dapo_raw_prompt: bool = False
 
-    # mixed-group RLSD
-    lmbda: float = 0.5
-    lmbda_decay_steps: int = 50
-    jsd_token_clip: float = 0.2
+    # Token-gap shaping: one lambda schedule for all split groups.
+    # token_gap_decay_steps <= 0 keeps token_gap_lambda constant; > 0 linearly decays to GRPO.
+    token_gap_lambda: float = 1.0
+    token_gap_decay_steps: int = 50
     rollout_filter: str = "all"
     fixed_teacher: bool = False
     teacher_update_interval_steps: int = 10
@@ -51,15 +51,16 @@ class ScriptArguments:
         "{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n"
     )
 
-    # all-correct/all-wrong fallback
-    lambda_plus: float = 0.3
-    lambda_minus: float = 0.3
-    lambda_plus_min: float = 0.0
-    lambda_minus_min: float = 0.0
-    fallback_decay_steps: int = 50
-    fallback_eps0: float = 0.05
-    adv_clip_low: float = -1.0
-    adv_clip_high: float = 1.0
+    # Split-group base advantages and group scales on the single decayed lambda.
+    # Mixed groups use the original GRPO advantage as base A.
+    all_correct_base_advantage: float = 1.0
+    all_wrong_base_advantage: float = -1.0
+    correct_weight_clip_low: float = 0.8
+    correct_weight_clip_high: float = 1.05
+    wrong_weight_clip_low: float = 0.95
+    wrong_weight_clip_high: float = 1.2
+    adv_clip_low: float = -1.2
+    adv_clip_high: float = 1.2
     suppress_gt_shortcut: bool = True
     # Disabled by default: no downweight on answer tokens.
     answer_token_downweight: float = 1.0
@@ -368,19 +369,18 @@ def main():
         train_dataset=train_dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
-        lmbda=script_args.lmbda,
-        lmbda_decay_steps=script_args.lmbda_decay_steps,
-        jsd_token_clip=script_args.jsd_token_clip,
+        lmbda=script_args.token_gap_lambda,
+        lmbda_decay_steps=script_args.token_gap_decay_steps,
         fixed_teacher=script_args.fixed_teacher,
         rollout_filter=script_args.rollout_filter,
         teacher_prompt_template=script_args.teacher_prompt_template,
         teacher_update_interval_steps=script_args.teacher_update_interval_steps,
-        lambda_plus=script_args.lambda_plus,
-        lambda_minus=script_args.lambda_minus,
-        lambda_plus_min=script_args.lambda_plus_min,
-        lambda_minus_min=script_args.lambda_minus_min,
-        fallback_decay_steps=script_args.fallback_decay_steps,
-        fallback_eps0=script_args.fallback_eps0,
+        all_correct_base_advantage=script_args.all_correct_base_advantage,
+        all_wrong_base_advantage=script_args.all_wrong_base_advantage,
+        correct_weight_clip_low=script_args.correct_weight_clip_low,
+        correct_weight_clip_high=script_args.correct_weight_clip_high,
+        wrong_weight_clip_low=script_args.wrong_weight_clip_low,
+        wrong_weight_clip_high=script_args.wrong_weight_clip_high,
         adv_clip_low=script_args.adv_clip_low,
         adv_clip_high=script_args.adv_clip_high,
         suppress_gt_shortcut=script_args.suppress_gt_shortcut,

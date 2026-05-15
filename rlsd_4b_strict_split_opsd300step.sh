@@ -107,21 +107,20 @@ VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
 VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
 
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
-# OPSD schedules (see rlsd_sign_fallback_strict_split_trainer): mixed alpha decays over
-# LMBDA_DECAY_STEPS; lambda_plus/minus decay over FALLBACK_DECAY_STEPS — both 300 here.
-LMBDA=${LMBDA:-0.2}
-LMBDA_DECAY_STEPS=${LMBDA_DECAY_STEPS:-300}
-JSD_TOKEN_CLIP=${JSD_TOKEN_CLIP:-0.2}
+# Token-gap shaping uses one lambda schedule for all split groups.
+# 0 = no decay; >0 linearly decays OPSD token-gap shaping to GRPO.
+TOKEN_GAP_LAMBDA=${TOKEN_GAP_LAMBDA:-1.0}
+TOKEN_GAP_DECAY_STEPS=${TOKEN_GAP_DECAY_STEPS:-300}
 
-LAMBDA_PLUS=${LAMBDA_PLUS:-0.05}
-LAMBDA_MINUS=${LAMBDA_MINUS:-0.2}
-LAMBDA_PLUS_MIN=${LAMBDA_PLUS_MIN:-0.0}
-LAMBDA_MINUS_MIN=${LAMBDA_MINUS_MIN:-0.0}
-FALLBACK_DECAY_STEPS=${FALLBACK_DECAY_STEPS:-50}
-FALLBACK_EPS0=${FALLBACK_EPS0:-0.05}
+ALL_CORRECT_BASE_ADVANTAGE=${ALL_CORRECT_BASE_ADVANTAGE:-1.0}
+ALL_WRONG_BASE_ADVANTAGE=${ALL_WRONG_BASE_ADVANTAGE:--1.0}
+CORRECT_WEIGHT_CLIP_LOW=${CORRECT_WEIGHT_CLIP_LOW:-0.8}
+CORRECT_WEIGHT_CLIP_HIGH=${CORRECT_WEIGHT_CLIP_HIGH:-1.05}
+WRONG_WEIGHT_CLIP_LOW=${WRONG_WEIGHT_CLIP_LOW:-0.95}
+WRONG_WEIGHT_CLIP_HIGH=${WRONG_WEIGHT_CLIP_HIGH:-1.2}
 TEACHER_UPDATE_INTERVAL_STEPS=${TEACHER_UPDATE_INTERVAL_STEPS:-10}
-ADV_CLIP_LOW=${ADV_CLIP_LOW:--1.0}
-ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.0}
+ADV_CLIP_LOW=${ADV_CLIP_LOW:--1.2}
+ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.2}
 SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
 ANSWER_TOKEN_DOWNWEIGHT=${ANSWER_TOKEN_DOWNWEIGHT:-1.0}
 REWARD_BINARY_THRESHOLD=${REWARD_BINARY_THRESHOLD:-0.5}
@@ -225,18 +224,17 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --repetition_penalty "${REPETITION_PENALTY}" \
     --generation_extra_kwargs_json "${GENERATION_KWARGS}" \
     --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
-    --lmbda "${LMBDA}" \
-    --lmbda_decay_steps "${LMBDA_DECAY_STEPS}" \
+    --token_gap_lambda "${TOKEN_GAP_LAMBDA}" \
+    --token_gap_decay_steps "${TOKEN_GAP_DECAY_STEPS}" \
     --fixed_teacher false \
     --teacher_update_interval_steps "${TEACHER_UPDATE_INTERVAL_STEPS}" \
-    --jsd_token_clip "${JSD_TOKEN_CLIP}" \
     --rollout_filter "${ROLLOUT_FILTER}" \
-    --lambda_plus "${LAMBDA_PLUS}" \
-    --lambda_minus "${LAMBDA_MINUS}" \
-    --lambda_plus_min "${LAMBDA_PLUS_MIN}" \
-    --lambda_minus_min "${LAMBDA_MINUS_MIN}" \
-    --fallback_decay_steps "${FALLBACK_DECAY_STEPS}" \
-    --fallback_eps0 "${FALLBACK_EPS0}" \
+    --all_correct_base_advantage "${ALL_CORRECT_BASE_ADVANTAGE}" \
+    --all_wrong_base_advantage "${ALL_WRONG_BASE_ADVANTAGE}" \
+    --correct_weight_clip_low "${CORRECT_WEIGHT_CLIP_LOW}" \
+    --correct_weight_clip_high "${CORRECT_WEIGHT_CLIP_HIGH}" \
+    --wrong_weight_clip_low "${WRONG_WEIGHT_CLIP_LOW}" \
+    --wrong_weight_clip_high "${WRONG_WEIGHT_CLIP_HIGH}" \
     --adv_clip_low "${ADV_CLIP_LOW}" \
     --adv_clip_high "${ADV_CLIP_HIGH}" \
     --suppress_gt_shortcut "${SUPPRESS_GT_SHORTCUT}" \

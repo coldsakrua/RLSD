@@ -18,24 +18,24 @@ _TAIL_ANSWER_RE = re.compile(
 class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
     """
     Strict split OPSD variant:
-    - all-correct group + mixed-correct samples: positive + negative shaping
-      (encourage with lambda_plus on up-gain tokens, suppress with lambda_minus on down-gain tokens)
-    - all-wrong group + mixed-wrong samples: negative OPSD log shaping
-    - wrong samples keep only down-pressure
+    - mixed groups use the original GRPO sequence advantage as base A
+    - all-correct/all-wrong groups use explicit signed fallback base advantages
+    - token shaping uses one decayed lambda schedule:
+      A_t = A * (1 + lambda_t * (clip(exp(sign(A) * gap_t)) - 1))
     - with strict_split_mixed_only=True, all-correct/all-wrong groups are logged but receive zero feedback
     """
 
     def __init__(
         self,
         *args,
-        lambda_plus: float = 0.3,
-        lambda_minus: float = 0.3,
-        lambda_plus_min: float = 0.0,
-        lambda_minus_min: float = 0.0,
-        fallback_decay_steps: int = 50,
-        fallback_eps0: float = 0.05,
-        adv_clip_low: float = -1.0,
-        adv_clip_high: float = 1.0,
+        all_correct_base_advantage: float = 1.0,
+        all_wrong_base_advantage: float = -1.0,
+        correct_weight_clip_low: float = 0.8,
+        correct_weight_clip_high: float = 1.05,
+        wrong_weight_clip_low: float = 0.95,
+        wrong_weight_clip_high: float = 1.2,
+        adv_clip_low: float = -1.2,
+        adv_clip_high: float = 1.2,
         answer_token_downweight: float = 1.0,
         suppress_gt_shortcut: bool = True,
         reward_binary_threshold: float = 0.5,
@@ -44,12 +44,12 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.lambda_plus = float(lambda_plus)
-        self.lambda_minus = float(lambda_minus)
-        self.lambda_plus_min = float(lambda_plus_min)
-        self.lambda_minus_min = float(lambda_minus_min)
-        self.fallback_decay_steps = int(fallback_decay_steps)
-        self.fallback_eps0 = float(fallback_eps0)
+        self.all_correct_base_advantage = float(all_correct_base_advantage)
+        self.all_wrong_base_advantage = float(all_wrong_base_advantage)
+        self.correct_weight_clip_low = float(correct_weight_clip_low)
+        self.correct_weight_clip_high = float(correct_weight_clip_high)
+        self.wrong_weight_clip_low = float(wrong_weight_clip_low)
+        self.wrong_weight_clip_high = float(wrong_weight_clip_high)
         self.adv_clip_low = float(adv_clip_low)
         self.adv_clip_high = float(adv_clip_high)
         self.answer_token_downweight = float(answer_token_downweight)
@@ -57,13 +57,6 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         self.reward_binary_threshold = float(reward_binary_threshold)
         self.fallback_tail_tokens = int(fallback_tail_tokens)
         self.strict_split_mixed_only = bool(strict_split_mixed_only)
-
-    def _current_fallback_lambda(self, start: float, min_value: float) -> float:
-        if self.fallback_decay_steps <= 0:
-            return float(start)
-        step = getattr(self.state, "global_step", 0)
-        progress = min(max(step, 0), self.fallback_decay_steps) / float(self.fallback_decay_steps)
-        return float(start) + (float(min_value) - float(start)) * progress
 
     def _expand_to_samples(self, values: Sequence[Any], target_len: int) -> List[Any]:
         if not values:
@@ -94,25 +87,6 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         if reward_t.numel() != sample_count:
             reward_t = torch.zeros(sample_count, dtype=torch.float32, device=device)
         return (reward_t > self.reward_binary_threshold).float()
-
-    def _rowwise_minmax_01(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        mask_bool = mask.bool()
-        row_min = torch.where(mask_bool, values, torch.full_like(values, float("inf"))).min(dim=1).values
-        row_max = torch.where(mask_bool, values, torch.full_like(values, float("-inf"))).max(dim=1).values
-
-        no_valid = mask_bool.sum(dim=1) == 0
-        row_min = torch.where(no_valid, torch.zeros_like(row_min), row_min)
-        row_max = torch.where(no_valid, torch.ones_like(row_max), row_max)
-
-        denom = (row_max - row_min).clamp(min=1e-6).unsqueeze(1)
-        out = (values - row_min.unsqueeze(1)) / denom
-        return out * mask
-
-    def _normalize_mean_abs(self, adv: torch.Tensor, mask: torch.Tensor, target_mean_abs: float) -> torch.Tensor:
-        lengths = mask.sum(dim=1).clamp(min=1.0)
-        mean_abs = (adv.abs() * mask).sum(dim=1) / lengths
-        scale = (float(target_mean_abs) / mean_abs.clamp(min=1e-6)).unsqueeze(1)
-        return adv * scale * mask
 
     def _answer_spans(self, text: str) -> List[Tuple[int, int]]:
         spans: List[Tuple[int, int]] = []
@@ -212,9 +186,6 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         )
         g = (teacher_logps - student_logps).detach() * completion_mask
 
-        clip_low = 1.0 - self.jsd_token_clip
-        clip_high = 1.0 + self.jsd_token_clip
-
         snap_mask = self._completion_mask_through_first_eos(completion_ids)
         completion_texts = self._decode_completion_texts(completion_ids, snap_mask)
         rewards_binary = self._compute_binary_rewards(
@@ -238,48 +209,70 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         all_wrong = all_wrong_group.repeat_interleave(self.num_generations).unsqueeze(1)
         mixed = mixed_group.repeat_interleave(self.num_generations).unsqueeze(1)
 
-        # Split mixed groups by correctness.
-        # Correct samples: dual-side rule (encourage up-gain, suppress down-gain).
-        # Wrong samples: down-pressure only.
-        base_adv = seq_advantages.unsqueeze(1)
-        base_mag = base_adv.abs()
+        # Split mixed groups by correctness for diagnostics. Mixed samples keep
+        # their original GRPO sequence advantage as the base A.
+        mixed_base_adv = seq_advantages.unsqueeze(1)
         sample_correct = (rewards_binary > 0.5).unsqueeze(1)
         sample_wrong = ~sample_correct
         mixed_correct = mixed & sample_correct
         mixed_wrong = mixed & sample_wrong
 
-        lambda_plus_now = self._current_fallback_lambda(self.lambda_plus, self.lambda_plus_min)
-        lambda_minus_now = self._current_fallback_lambda(self.lambda_minus, self.lambda_minus_min)
-        alpha_mixed = self._current_lambda()
-        w_pos = torch.clamp(torch.exp(g), min=clip_low, max=clip_high)
-        w_down = torch.clamp(torch.exp(-g), min=clip_low, max=clip_high)
-        gain_pos = torch.relu(w_pos - 1.0)
-        gain_down = torch.relu(w_down - 1.0)
-        down_active = gain_down > 0
+        lambda_now = self._current_lambda()
+        if abs(float(self.lmbda)) <= 1e-12:
+            fallback_base_scale = 0.0
+        else:
+            fallback_base_scale = abs(float(lambda_now) / float(self.lmbda))
+            fallback_base_scale = min(max(fallback_base_scale, 0.0), 1.0)
 
-        mixed_pos_adv = base_mag * (1.0 + alpha_mixed * lambda_plus_now * gain_pos)
-        mixed_neg_adv = -base_mag * (1.0 + alpha_mixed * lambda_minus_now * gain_down)
-        mixed_correct_adv = torch.where(down_active, mixed_neg_adv, mixed_pos_adv)
+        def _shape_with_token_gap(
+            base_adv: torch.Tensor,
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            sign = torch.sign(base_adv)
+            signed_gap = torch.clamp(sign * g, min=-20.0, max=20.0)
+            is_positive_traj = sign >= 0
+            raw_weight = torch.exp(signed_gap)
+            clip_low_t = torch.where(
+                is_positive_traj,
+                torch.full_like(base_adv, float(self.correct_weight_clip_low)),
+                torch.full_like(base_adv, float(self.wrong_weight_clip_low)),
+            )
+            clip_high_t = torch.where(
+                is_positive_traj,
+                torch.full_like(base_adv, float(self.correct_weight_clip_high)),
+                torch.full_like(base_adv, float(self.wrong_weight_clip_high)),
+            )
+            weight = torch.minimum(torch.maximum(raw_weight, clip_low_t), clip_high_t)
+            effective_delta = lambda_now * (weight - 1.0) * completion_mask
+            factor = torch.clamp(1.0 + effective_delta, min=0.0)
+            shaped = base_adv * factor
+            return shaped * completion_mask, weight, effective_delta
+
+        mixed_adv, mixed_weight, mixed_delta = _shape_with_token_gap(mixed_base_adv)
         mixed_mask = self._rollout_mask(seq_advantages).unsqueeze(1)
-        mixed_correct_adv = torch.where(mixed_mask, mixed_correct_adv, base_adv)
-        mixed_neg_adv = torch.where(mixed_mask, mixed_neg_adv, base_adv)
+        mixed_fallback_adv = mixed_base_adv.expand_as(g) * completion_mask
+        mixed_adv = torch.where(mixed_mask, mixed_adv, mixed_fallback_adv)
+        mixed_delta = torch.where(mixed_mask, mixed_delta, torch.zeros_like(mixed_delta))
 
-        # all-correct: dual-side fallback.
-        plus_base = torch.full_like(g, float(self.fallback_eps0)) * completion_mask
-        plus_adv = plus_base * (1.0 + lambda_plus_now * gain_pos)
-        minus_on_correct = -plus_base * (1.0 + lambda_minus_now * gain_down)
-        all_correct_adv = torch.where(down_active, minus_on_correct, plus_adv)
+        all_correct_base_adv = (
+            torch.full_like(g, float(self.all_correct_base_advantage) * fallback_base_scale)
+            * completion_mask
+        )
+        all_wrong_base_adv = (
+            torch.full_like(g, float(self.all_wrong_base_advantage) * fallback_base_scale)
+            * completion_mask
+        )
+        all_correct_adv, correct_weight, correct_delta = _shape_with_token_gap(all_correct_base_adv)
+        all_wrong_adv, wrong_weight, wrong_delta = _shape_with_token_gap(all_wrong_base_adv)
 
-        # all-wrong: one-sided negative OPSD (down-pressure only).
-        minus_base = -torch.full_like(g, float(self.fallback_eps0)) * completion_mask
-        minus_adv = minus_base * (1.0 + lambda_minus_now * gain_down)
-
-        token_adv = torch.zeros_like(base_adv)
+        token_adv = torch.zeros_like(g)
+        effective_delta = torch.zeros_like(g)
         if not self.strict_split_mixed_only:
             token_adv = torch.where(all_correct, all_correct_adv, token_adv)
-            token_adv = torch.where(all_wrong, minus_adv, token_adv)
-        token_adv = torch.where(mixed_correct, mixed_correct_adv, token_adv)
-        token_adv = torch.where(mixed_wrong, mixed_neg_adv, token_adv)
+            token_adv = torch.where(all_wrong, all_wrong_adv, token_adv)
+            effective_delta = torch.where(all_correct, correct_delta, effective_delta)
+            effective_delta = torch.where(all_wrong, wrong_delta, effective_delta)
+        token_adv = torch.where(mixed, mixed_adv, token_adv)
+        effective_delta = torch.where(mixed, mixed_delta, effective_delta)
 
         answer_weights = self._answer_weight_mask(
             completion_texts, completion_mask, decode_length_mask=snap_mask
@@ -323,12 +316,24 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
             no_feedback_group = torch.zeros_like(mixed_group)
             feedback_group = torch.ones_like(mixed_group, dtype=torch.bool)
 
-        self._log_metric("strict_split/mixed_alpha", alpha_mixed)
+        token_count = completion_mask.sum().clamp(min=1.0)
+
+        self._log_metric("strict_split/token_gap_lambda", lambda_now)
         self._log_metric("strict_split/mixed_only", float(self.strict_split_mixed_only))
         self._log_metric("strict_split/feedback_group_frac", float(feedback_group.float().mean().item()))
         self._log_metric("strict_split/no_feedback_group_frac", float(no_feedback_group.float().mean().item()))
-        self._log_metric("strict_split/lambda_plus", lambda_plus_now)
-        self._log_metric("strict_split/lambda_minus", lambda_minus_now)
+        self._log_metric("strict_split/correct_weight_clip_low", float(self.correct_weight_clip_low))
+        self._log_metric("strict_split/correct_weight_clip_high", float(self.correct_weight_clip_high))
+        self._log_metric("strict_split/wrong_weight_clip_low", float(self.wrong_weight_clip_low))
+        self._log_metric("strict_split/wrong_weight_clip_high", float(self.wrong_weight_clip_high))
+        self._log_metric(
+            "strict_split/all_correct_base_advantage",
+            float(self.all_correct_base_advantage),
+        )
+        self._log_metric(
+            "strict_split/all_wrong_base_advantage",
+            float(self.all_wrong_base_advantage),
+        )
         self._log_metric("strict_split/group_all_correct_frac", float(all_correct_group.float().mean().item()))
         self._log_metric("strict_split/group_all_wrong_frac", float(all_wrong_group.float().mean().item()))
         self._log_metric("strict_split/group_mixed_frac", float(mixed_group.float().mean().item()))
@@ -344,35 +349,26 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         self._log_metric("strict_split/completion_count_mixed_correct", float(completion_count_mixed_correct))
         self._log_metric("strict_split/completion_count_mixed_wrong", float(completion_count_mixed_wrong))
         self._log_metric(
-            "strict_split/one_sided_gain_pos_frac",
-            float(((gain_pos > 0).float() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()),
+            "strict_split/effective_delta_pos_frac",
+            float((((effective_delta > 0).float() * completion_mask).sum() / token_count).item()),
         )
         self._log_metric(
-            "strict_split/one_sided_gain_down_frac",
-            float(((gain_down > 0).float() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()),
+            "strict_split/effective_delta_neg_frac",
+            float((((effective_delta < 0).float() * completion_mask).sum() / token_count).item()),
         )
         self._log_metric(
-            "strict_split/correct_down_apply_frac",
-            float(
-                (((down_active & sample_correct).float() * completion_mask).sum().item())
-                / completion_mask.sum().clamp(min=1).item()
-            ),
+            "strict_split/effective_delta_zero_frac",
+            float((((effective_delta == 0).float() * completion_mask).sum() / token_count).item()),
         )
         self._log_metric("strict_split/answer_weight_mean", float(answer_weights.mean().item()))
-        self._log_metric("strict_split/adv_abs_mean", float((token_adv.abs() * completion_mask).sum().item() / completion_mask.sum().clamp(min=1).item()))
+        self._log_metric("strict_split/adv_abs_mean", float(((token_adv.abs() * completion_mask).sum() / token_count).item()))
         self._log_vector_stats("strict_split/seq_adv", seq_advantages)
         self._log_masked_stats("strict_split/token_gap", g, completion_mask)
-        self._log_masked_stats("strict_split/w_pos", w_pos, completion_mask)
-        self._log_masked_stats("strict_split/w_down", w_down, completion_mask)
+        self._log_masked_stats("strict_split/mixed_weight", mixed_weight, completion_mask)
+        self._log_masked_stats("strict_split/correct_weight", correct_weight, completion_mask)
+        self._log_masked_stats("strict_split/wrong_weight", wrong_weight, completion_mask)
+        self._log_masked_stats("strict_split/effective_delta", effective_delta, completion_mask)
         self._log_masked_stats("strict_split/token_adv", token_adv, completion_mask)
-        self._log_metric(
-            "strict_split/w_pos_gt1_frac",
-            float((((w_pos > 1.0).float() * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)).item()),
-        )
-        self._log_metric(
-            "strict_split/w_down_gt1_frac",
-            float((((w_down > 1.0).float() * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)).item()),
-        )
         self._stash_rollout_for_checkpoint(
             inputs,
             completion_ids,
