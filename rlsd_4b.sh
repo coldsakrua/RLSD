@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-
+#SBATCH --exclude=gpua800n24,gpua800n23,gpua800n26,gpua800n25,gpua800n27
 set -eo pipefail
 nvidia-smi
 
@@ -23,8 +23,6 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset ROCR_VISIBLE_DEVICES
 
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
-# Raw DAPO: data/dapo/dapo-math-17k.parquet — preprocess once: bash scripts/run_preprocess_dapo_math.sh
-# Then point DATASET_PATH at data/dapo/dapo-math-17k-standard-boxed.parquet and set NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=false.
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
 OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b}
