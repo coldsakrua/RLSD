@@ -7,7 +7,14 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from run_logging import normalize_metric_key
 
 
 def _is_loggable_scalar(v: Any) -> bool:
@@ -60,6 +67,11 @@ def main() -> None:
         action="store_true",
         help="Log keys as in JSONL (charts-only layout); same as --train-prefix=''.",
     )
+    parser.add_argument(
+        "--no-normalize-keys",
+        action="store_true",
+        help="Keep strict_split*/rlsd* prefixes from JSONL (default: strip for unified CARL schema).",
+    )
     args = parser.parse_args()
     train_prefix = "" if args.no_train_prefix else (args.train_prefix or "").strip()
 
@@ -99,11 +111,12 @@ def main() -> None:
                 step = rec.get("step")
                 if step is None:
                     continue
-                payload = {
-                    _wandb_key(k, train_prefix=train_prefix): v
-                    for k, v in rec.items()
-                    if k not in ("timestamp_utc", "step") and _is_loggable_scalar(v)
-                }
+                payload = {}
+                for k, v in rec.items():
+                    if k in ("timestamp_utc", "step", "wall_time_sec", "epoch") or not _is_loggable_scalar(v):
+                        continue
+                    key = k if args.no_normalize_keys else normalize_metric_key(k)
+                    payload[_wandb_key(key, train_prefix=train_prefix)] = v
                 if payload:
                     wandb.log(payload, step=int(step))
     finally:

@@ -50,6 +50,9 @@ class ScriptArguments:
     teacher_prompt_template: str = (
         "{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n"
     )
+    teacher_prompt_template_no_reference: str = "{prompt}\n\n[Student response]\n"
+    # Ablation: teacher sees problem + student rollout only (no ground-truth solution).
+    teacher_include_reference_solution: bool = True
 
     # Split-group base advantages and group scales on the single decayed lambda.
     # Mixed groups use the original GRPO advantage as base A.
@@ -210,9 +213,19 @@ def main():
         training_args,
         disable_wandb=bool(script_args.disable_wandb),
         run_name=script_args.run_config if script_args.run_config else None,
-        extra_meta={"entrypoint": os.path.basename(__file__)},
+        extra_meta={
+            "entrypoint": os.path.basename(__file__),
+            "teacher_include_reference_solution": bool(
+                script_args.teacher_include_reference_solution
+            ),
+        },
     )
     print(f"[wandb] meta_path={logging_setup['meta_path']}", flush=True)
+    print(
+        f"[teacher] include_reference_solution="
+        f"{bool(script_args.teacher_include_reference_solution)}",
+        flush=True,
+    )
 
     if script_args.dapo_epsilon_high is not None:
         setattr(training_args, "epsilon_high", float(script_args.dapo_epsilon_high))
@@ -374,6 +387,8 @@ def main():
         fixed_teacher=script_args.fixed_teacher,
         rollout_filter=script_args.rollout_filter,
         teacher_prompt_template=script_args.teacher_prompt_template,
+        teacher_prompt_template_no_reference=script_args.teacher_prompt_template_no_reference,
+        teacher_include_reference_solution=script_args.teacher_include_reference_solution,
         teacher_update_interval_steps=script_args.teacher_update_interval_steps,
         all_correct_base_advantage=script_args.all_correct_base_advantage,
         all_wrong_base_advantage=script_args.all_wrong_base_advantage,

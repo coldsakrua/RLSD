@@ -62,6 +62,33 @@ def _is_numeric_scalar(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+# Longest prefixes first so e.g. strict_split_flip/ is stripped before strict/.
+_METRIC_PREFIXES_TO_STRIP = (
+    "strict_split_flip/",
+    "strict_split/",
+    "strict/",
+    "rlsd/",
+    "opsd/",
+)
+
+
+def normalize_metric_key(key: str) -> str:
+    """Drop trainer-variant prefixes so dashboards share one schema (e.g. wrong_weight/mean)."""
+    k = str(key).strip()
+    if not k:
+        return k
+    while True:
+        stripped = False
+        for prefix in _METRIC_PREFIXES_TO_STRIP:
+            if k.startswith(prefix):
+                k = k[len(prefix) :]
+                stripped = True
+                break
+        if not stripped:
+            break
+    return k
+
+
 def _json_dump(path: str, payload: Dict[str, Any]) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
@@ -203,7 +230,7 @@ class StructuredJsonMetricsCallback(TrainerCallback):
         for k, v in logs.items():
             cv = _coerce_log_value(v)
             if cv is not None:
-                clean_logs[k] = cv
+                clean_logs[normalize_metric_key(k)] = cv
 
         record = {
             "timestamp_utc": _utc_now_iso(),

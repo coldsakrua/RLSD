@@ -7,6 +7,13 @@ from trl import GRPOTrainer
 
 from data_utils import extract_last_user_text, normalize_prompt_to_standard_instruction
 from reward_fn import extract_math_reward_answer
+from run_logging import normalize_metric_key
+
+
+DEFAULT_TEACHER_PROMPT_WITH_REFERENCE = (
+    "{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n"
+)
+DEFAULT_TEACHER_PROMPT_NO_REFERENCE = "{prompt}\n\n[Student response]\n"
 
 
 class RLSDTrainer(GRPOTrainer):
@@ -19,9 +26,9 @@ class RLSDTrainer(GRPOTrainer):
         fixed_teacher: bool = False,
         teacher_update_interval_steps: int = 10,
         rollout_filter: str = "all",
-        teacher_prompt_template: str = (
-            "{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n"
-        ),
+        teacher_prompt_template: str = DEFAULT_TEACHER_PROMPT_WITH_REFERENCE,
+        teacher_prompt_template_no_reference: str = DEFAULT_TEACHER_PROMPT_NO_REFERENCE,
+        teacher_include_reference_solution: bool = True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -32,6 +39,8 @@ class RLSDTrainer(GRPOTrainer):
         self.teacher_update_interval_steps = max(0, int(teacher_update_interval_steps))
         self.rollout_filter = rollout_filter
         self.teacher_prompt_template = teacher_prompt_template
+        self.teacher_prompt_template_no_reference = teacher_prompt_template_no_reference
+        self.teacher_include_reference_solution = bool(teacher_include_reference_solution)
         self._last_rollout_snapshot: Optional[Dict[str, Any]] = None
         self._teacher_snapshot_step: int = -1
         self._teacher_snapshot_state: Optional[Dict[str, torch.Tensor]] = None
@@ -225,6 +234,7 @@ class RLSDTrainer(GRPOTrainer):
         return output
 
     def _log_metric(self, key: str, value: float):
+        key = normalize_metric_key(key)
         mode = "train" if self.model.training else "eval"
         if mode not in self._metrics:
             self._metrics[mode] = {}
@@ -270,9 +280,14 @@ class RLSDTrainer(GRPOTrainer):
         prompts: List[str] = []
         for row in inputs:
             prompt = self._prompt_to_text(row.get("prompt", ""))
-            solution = row.get("solution", "")
-            solution = solution if isinstance(solution, str) else str(solution)
-            prompts.append(self.teacher_prompt_template.format(prompt=prompt, solution=solution))
+            if self.teacher_include_reference_solution:
+                solution = row.get("solution", "")
+                solution = solution if isinstance(solution, str) else str(solution)
+                prompts.append(
+                    self.teacher_prompt_template.format(prompt=prompt, solution=solution)
+                )
+            else:
+                prompts.append(self.teacher_prompt_template_no_reference.format(prompt=prompt))
         return prompts
 
     def _teacher_anchor_step(self) -> int:

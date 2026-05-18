@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n24
+#SBATCH --exclude=gpua800n13,gpua800n14
 
 set -eo pipefail
 nvidia-smi
@@ -107,9 +107,8 @@ VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
 VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
 
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
-# 0 = no decay; >0 linearly decays OPSD token-gap shaping to GRPO.
 TOKEN_GAP_LAMBDA=${TOKEN_GAP_LAMBDA:-1.0}
-TOKEN_GAP_DECAY_STEPS=${TOKEN_GAP_DECAY_STEPS:-50}
+TOKEN_GAP_DECAY_STEPS=${TOKEN_GAP_DECAY_STEPS:-300}
 
 ALL_CORRECT_BASE_ADVANTAGE=${ALL_CORRECT_BASE_ADVANTAGE:-1.0}
 ALL_WRONG_BASE_ADVANTAGE=${ALL_WRONG_BASE_ADVANTAGE:--1.0}
@@ -158,6 +157,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "[ablation] strict_split_mixed_only=${STRICT_SPLIT_MIXED_ONLY}"
 echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
 CUDA_VISIBLE_DEVICES="${GEN_CUDA_VISIBLE_DEVICES}" \
 PYTORCH_CUDA_ALLOC_CONF="" \
@@ -181,7 +181,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --num_processes 1 \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --main_process_port "${MAIN_PROCESS_PORT}" \
-    opsd_train_anchor_strict_split.py \
+    opsd_train_anchor_strict_split_flip.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
     --dataset_split train \

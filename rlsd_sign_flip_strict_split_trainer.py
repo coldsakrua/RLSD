@@ -341,61 +341,61 @@ class RLSDSignFlipStrictSplitTrainer(RLSDTrainer):
 
         token_count = completion_mask.sum().clamp(min=1.0)
 
-        self._log_metric("strict_split_flip/token_gap_lambda", lambda_now)
-        self._log_metric("strict_split_flip/mixed_only", float(self.strict_split_mixed_only))
-        self._log_metric("strict_split_flip/feedback_group_frac", float(feedback_group.float().mean().item()))
-        self._log_metric("strict_split_flip/no_feedback_group_frac", float(no_feedback_group.float().mean().item()))
-        self._log_metric("strict_split_flip/correct_weight_clip_low", float(self.correct_weight_clip_low))
-        self._log_metric("strict_split_flip/correct_weight_clip_high", float(self.correct_weight_clip_high))
-        self._log_metric("strict_split_flip/wrong_weight_clip_low", float(self.wrong_weight_clip_low))
-        self._log_metric("strict_split_flip/wrong_weight_clip_high", float(self.wrong_weight_clip_high))
+        self._log_metric("token_gap_lambda", lambda_now)
+        self._log_metric("mixed_only", float(self.strict_split_mixed_only))
+        self._log_metric("feedback_group_frac", float(feedback_group.float().mean().item()))
+        self._log_metric("no_feedback_group_frac", float(no_feedback_group.float().mean().item()))
+        self._log_metric("correct_weight_clip_low", float(self.correct_weight_clip_low))
+        self._log_metric("correct_weight_clip_high", float(self.correct_weight_clip_high))
+        self._log_metric("wrong_weight_clip_low", float(self.wrong_weight_clip_low))
+        self._log_metric("wrong_weight_clip_high", float(self.wrong_weight_clip_high))
         self._log_metric(
-            "strict_split_flip/all_correct_base_advantage",
+            "all_correct_base_advantage",
             float(self.all_correct_base_advantage),
         )
         self._log_metric(
-            "strict_split_flip/all_wrong_base_advantage",
+            "all_wrong_base_advantage",
             float(self.all_wrong_base_advantage),
         )
-        self._log_metric("strict_split_flip/group_all_correct_frac", float(all_correct_group.float().mean().item()))
-        self._log_metric("strict_split_flip/group_all_wrong_frac", float(all_wrong_group.float().mean().item()))
-        self._log_metric("strict_split_flip/group_mixed_frac", float(mixed_group.float().mean().item()))
-        self._log_metric("strict_split_flip/reward_mean_all_correct", reward_mean_all_correct)
-        self._log_metric("strict_split_flip/reward_mean_all_wrong", reward_mean_all_wrong)
-        self._log_metric("strict_split_flip/reward_mean_mixed", reward_mean_mixed)
-        self._log_metric("strict_split_flip/prompt_count_all_correct", float(prompt_count_all_correct))
-        self._log_metric("strict_split_flip/prompt_count_all_wrong", float(prompt_count_all_wrong))
-        self._log_metric("strict_split_flip/prompt_count_mixed", float(prompt_count_mixed))
-        self._log_metric("strict_split_flip/completion_count_all_correct", float(completion_count_all_correct))
-        self._log_metric("strict_split_flip/completion_count_all_wrong", float(completion_count_all_wrong))
-        self._log_metric("strict_split_flip/completion_count_mixed", float(completion_count_mixed))
-        self._log_metric("strict_split_flip/completion_count_mixed_correct", float(completion_count_mixed_correct))
-        self._log_metric("strict_split_flip/completion_count_mixed_wrong", float(completion_count_mixed_wrong))
+        self._log_metric("group_all_correct_frac", float(all_correct_group.float().mean().item()))
+        self._log_metric("group_all_wrong_frac", float(all_wrong_group.float().mean().item()))
+        self._log_metric("group_mixed_frac", float(mixed_group.float().mean().item()))
+        self._log_metric("reward_mean_all_correct", reward_mean_all_correct)
+        self._log_metric("reward_mean_all_wrong", reward_mean_all_wrong)
+        self._log_metric("reward_mean_mixed", reward_mean_mixed)
+        self._log_metric("prompt_count_all_correct", float(prompt_count_all_correct))
+        self._log_metric("prompt_count_all_wrong", float(prompt_count_all_wrong))
+        self._log_metric("prompt_count_mixed", float(prompt_count_mixed))
+        self._log_metric("completion_count_all_correct", float(completion_count_all_correct))
+        self._log_metric("completion_count_all_wrong", float(completion_count_all_wrong))
+        self._log_metric("completion_count_mixed", float(completion_count_mixed))
+        self._log_metric("completion_count_mixed_correct", float(completion_count_mixed_correct))
+        self._log_metric("completion_count_mixed_wrong", float(completion_count_mixed_wrong))
         self._log_metric(
-            "strict_split_flip/effective_delta_pos_frac",
+            "effective_delta_pos_frac",
             float((((effective_delta > 0).float() * completion_mask).sum() / token_count).item()),
         )
         self._log_metric(
-            "strict_split_flip/effective_delta_neg_frac",
+            "effective_delta_neg_frac",
             float((((effective_delta < 0).float() * completion_mask).sum() / token_count).item()),
         )
         self._log_metric(
-            "strict_split_flip/effective_delta_zero_frac",
+            "effective_delta_zero_frac",
             float((((effective_delta == 0).float() * completion_mask).sum() / token_count).item()),
         )
         self._log_metric(
-            "strict_split_flip/sign_flip_frac",
+            "sign_flip_frac",
             float(((flip_active * completion_mask).sum() / token_count).item()),
         )
-        self._log_metric("strict_split_flip/answer_weight_mean", float(answer_weights.mean().item()))
-        self._log_metric("strict_split_flip/adv_abs_mean", float(((token_adv.abs() * completion_mask).sum() / token_count).item()))
-        self._log_vector_stats("strict_split_flip/seq_adv", seq_advantages)
-        self._log_masked_stats("strict_split_flip/token_gap", g, completion_mask)
-        self._log_masked_stats("strict_split_flip/mixed_weight", mixed_weight, completion_mask)
-        self._log_masked_stats("strict_split_flip/correct_weight", correct_weight, completion_mask)
-        self._log_masked_stats("strict_split_flip/wrong_weight", wrong_weight, completion_mask)
-        self._log_masked_stats("strict_split_flip/effective_delta", effective_delta, completion_mask)
-        self._log_masked_stats("strict_split_flip/token_adv", token_adv, completion_mask)
+        self._log_metric("answer_weight_mean", float(answer_weights.mean().item()))
+        self._log_metric("adv_abs_mean", float(((token_adv.abs() * completion_mask).sum() / token_count).item()))
+        self._log_vector_stats("seq_adv", seq_advantages)
+        self._log_masked_stats("token_gap", g, completion_mask)
+        self._log_masked_stats("mixed_weight", mixed_weight, completion_mask)
+        self._log_masked_stats("correct_weight", correct_weight, completion_mask)
+        self._log_masked_stats("wrong_weight", wrong_weight, completion_mask)
+        self._log_masked_stats("effective_delta", effective_delta, completion_mask)
+        self._log_masked_stats("token_adv", token_adv, completion_mask)
         self._stash_rollout_for_checkpoint(
             inputs,
             completion_ids,

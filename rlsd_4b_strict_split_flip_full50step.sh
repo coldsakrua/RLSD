@@ -1,12 +1,11 @@
 #!/bin/bash
-#SBATCH -o logs/rlsd_4b_strict_split_250step.%j.out
+#SBATCH -o logs/rlsd_4b_strict_split_flip_decay50step.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n24,gpua800n23,gpua800n26,gpua800n25,gpua800n27
 
 set -eo pipefail
 nvidia-smi
@@ -28,8 +27,8 @@ MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/q
 # Then point DATASET_PATH at data/dapo/dapo-math-17k-standard-boxed.parquet and set NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=false.
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_strict_split_250step}
-RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_strict_split_250step}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_strict_split_flip_decay50step}
+RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_strict_split_flip}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
@@ -107,10 +106,8 @@ VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
 VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
 
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
-# Token-gap shaping uses one lambda schedule for all split groups.
-# 0 = no decay; >0 linearly decays OPSD token-gap shaping to GRPO.
 TOKEN_GAP_LAMBDA=${TOKEN_GAP_LAMBDA:-1.0}
-TOKEN_GAP_DECAY_STEPS=${TOKEN_GAP_DECAY_STEPS:-250}
+TOKEN_GAP_DECAY_STEPS=${TOKEN_GAP_DECAY_STEPS:-50}
 
 ALL_CORRECT_BASE_ADVANTAGE=${ALL_CORRECT_BASE_ADVANTAGE:-1.0}
 ALL_WRONG_BASE_ADVANTAGE=${ALL_WRONG_BASE_ADVANTAGE:--1.0}
@@ -133,7 +130,7 @@ REWARD_REPEAT_TRIPLET_PENALTY=${REWARD_REPEAT_TRIPLET_PENALTY:-0.0}
 REWARD_REPEAT_TRIPLET_LEV_THRESHOLD=${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD:-0}
 DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}
 REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
-SAVE_ROLLOUT_SNAPSHOTS=${SAVE_ROLLOUT_SNAPSHOTS:-false}
+SAVE_ROLLOUT_SNAPSHOTS=${SAVE_ROLLOUT_SNAPSHOTS:-true}
 ROLLOUT_SNAPSHOT_INTERVAL_STEPS=${ROLLOUT_SNAPSHOT_INTERVAL_STEPS:-10}
 DAPO_EPSILON=${DAPO_EPSILON:-0.2}
 DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.28}
@@ -181,7 +178,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --num_processes 1 \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --main_process_port "${MAIN_PROCESS_PORT}" \
-    opsd_train_anchor_strict_split.py \
+    opsd_train_anchor_strict_split_flip.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
     --dataset_split train \

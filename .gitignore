@@ -7,3 +7,6 @@ outputs/
 
 # Local W&B replay (scripts/jsonl_metrics_to_wandb.py --offline)
 wandb_jsonl_replay/
+wandb/
+scripts/
+wandbsync.sh
