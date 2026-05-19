@@ -41,9 +41,12 @@ class ScriptArguments:
     use_dapo_raw_prompt: bool = False
 
     # Token-gap shaping: one lambda schedule for all split groups.
-    # token_gap_decay_steps <= 0 keeps token_gap_lambda constant; > 0 linearly decays to GRPO.
+    # token_gap_decay_steps <= 0: constant token_gap_lambda.
+    # >0 + token_gap_decay_linear: linear ramp to GRPO over decay_steps.
+    # >0 + not linear: full OPSD until global_step >= decay_steps, then GRPO-only.
     token_gap_lambda: float = 1.0
     token_gap_decay_steps: int = 50
+    token_gap_decay_linear: bool = True
     rollout_filter: str = "all"
     fixed_teacher: bool = False
     teacher_update_interval_steps: int = 10
@@ -384,6 +387,7 @@ def main():
         peft_config=peft_config,
         lmbda=script_args.token_gap_lambda,
         lmbda_decay_steps=script_args.token_gap_decay_steps,
+        lmbda_decay_linear=script_args.token_gap_decay_linear,
         fixed_teacher=script_args.fixed_teacher,
         rollout_filter=script_args.rollout_filter,
         teacher_prompt_template=script_args.teacher_prompt_template,

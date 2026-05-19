@@ -22,6 +22,7 @@ class RLSDTrainer(GRPOTrainer):
         *args,
         lmbda: float = 0.5,
         lmbda_decay_steps: int = 50,
+        lmbda_decay_linear: bool = True,
         jsd_token_clip: float = 0.2,
         fixed_teacher: bool = False,
         teacher_update_interval_steps: int = 10,
@@ -34,6 +35,7 @@ class RLSDTrainer(GRPOTrainer):
         super().__init__(*args, **kwargs)
         self.lmbda = float(lmbda)
         self.lmbda_decay_steps = int(lmbda_decay_steps)
+        self.lmbda_decay_linear = bool(lmbda_decay_linear)
         self.jsd_token_clip = float(jsd_token_clip)
         self.fixed_teacher = bool(fixed_teacher)
         self.teacher_update_interval_steps = max(0, int(teacher_update_interval_steps))
@@ -48,7 +50,12 @@ class RLSDTrainer(GRPOTrainer):
     def _current_lambda(self) -> float:
         if self.lmbda_decay_steps <= 0:
             return self.lmbda
-        step = getattr(self.state, "global_step", 0)
+        step = int(getattr(self.state, "global_step", 0) or 0)
+        if not self.lmbda_decay_linear:
+            # Plateau then cutoff: full OPSD before decay_steps, pure GRPO from decay_steps on.
+            if step >= self.lmbda_decay_steps:
+                return 0.0
+            return self.lmbda
         progress = min(max(step, 0), self.lmbda_decay_steps) / float(self.lmbda_decay_steps)
         return self.lmbda * (1.0 - progress)
 
