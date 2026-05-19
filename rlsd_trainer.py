@@ -6,7 +6,6 @@ import torch
 from trl import GRPOTrainer
 
 from data_utils import extract_last_user_text, normalize_prompt_to_standard_instruction
-from reward_fn import extract_math_reward_answer
 from run_logging import normalize_metric_key
 
 
@@ -43,7 +42,6 @@ class RLSDTrainer(GRPOTrainer):
         self.teacher_prompt_template = teacher_prompt_template
         self.teacher_prompt_template_no_reference = teacher_prompt_template_no_reference
         self.teacher_include_reference_solution = bool(teacher_include_reference_solution)
-        self._last_rollout_snapshot: Optional[Dict[str, Any]] = None
         self._teacher_snapshot_step: int = -1
         self._teacher_snapshot_state: Optional[Dict[str, torch.Tensor]] = None
 
@@ -140,7 +138,7 @@ class RLSDTrainer(GRPOTrainer):
     def _completion_mask_through_first_eos(self, completion_ids: torch.Tensor) -> torch.Tensor:
         """
         Mask through the first EOS (inclusive), else keep all completion positions.
-        Matches TRL pre-``mask_truncated_completions`` semantics so snapshots/logs see the full rollout string.
+        Matches TRL pre-``mask_truncated_completions`` semantics for decoding through the first EOS.
         """
         tokenizer = self._get_tokenizer()
         device = completion_ids.device
@@ -154,74 +152,6 @@ class RLSDTrainer(GRPOTrainer):
         eos_idx[any_eos] = is_eos.int().argmax(dim=1)[any_eos]
         seq = torch.arange(seq_len, device=device).unsqueeze(0).expand(is_eos.size(0), -1)
         return (seq <= eos_idx.unsqueeze(1)).long()
-
-    def _decode_completion_texts_snapshot(self, completion_ids: torch.Tensor) -> List[str]:
-        snap = self._completion_mask_through_first_eos(completion_ids)
-        return self._decode_completion_texts(completion_ids, snap)
-
-    def _stash_rollout_for_checkpoint(
-        self,
-        inputs: Sequence[Dict[str, Any]],
-        completion_ids: torch.Tensor,
-        completion_mask: torch.Tensor,
-        *,
-        reward_values: Optional[Sequence[float]] = None,
-        seq_advantages_1d: Optional[torch.Tensor] = None,
-        token_advantages: Optional[torch.Tensor] = None,
-    ) -> None:
-        if not getattr(self.args, "save_rollout_snapshots", False):
-            return
-        if hasattr(self, "accelerator") and not self.accelerator.is_main_process:
-            return
-        sample_count = int(completion_ids.size(0))
-        snap_mask = self._completion_mask_through_first_eos(completion_ids)
-        completions = self._decode_completion_texts(completion_ids, snap_mask)
-        prompt_rows = [self._prompt_to_text(x.get("prompt", "")) for x in inputs]
-        solution_rows = [x.get("solution", "") for x in inputs]
-        prompts_exp = self._expand_column_for_completions(prompt_rows, sample_count)
-        sols_exp = self._expand_column_for_completions(solution_rows, sample_count)
-        ended_eos = self._completion_ended_with_eos(completion_ids, snap_mask)
-
-        grpo_adv_list = None
-        if seq_advantages_1d is not None and seq_advantages_1d.dim() == 1:
-            grpo_adv_list = seq_advantages_1d.detach().cpu().tolist()
-
-        token_adv_mean_list = None
-        if token_advantages is not None and token_advantages.dim() == 2:
-            denom = completion_mask.sum(dim=1).clamp(min=1)
-            token_adv_mean_list = ((token_advantages * completion_mask).sum(dim=1) / denom).detach().cpu().tolist()
-
-        samples: List[Dict[str, Any]] = []
-        for i in range(sample_count):
-            sol_i = str(sols_exp[i]) if i < len(sols_exp) else ""
-            comp_i = completions[i]
-            item: Dict[str, Any] = {
-                "prompt": prompts_exp[i] if i < len(prompts_exp) else "",
-                "solution": sol_i,
-                "completion": comp_i,
-                "extracted_answer": extract_math_reward_answer(comp_i, for_ground_truth=False),
-                "extracted_ground_truth": extract_math_reward_answer(sol_i, for_ground_truth=True),
-                "ended_with_eos": ended_eos[i],
-            }
-            if reward_values is not None and i < len(reward_values):
-                item["reward"] = float(reward_values[i])
-            if grpo_adv_list is not None and i < len(grpo_adv_list):
-                item["grpo_advantage"] = float(grpo_adv_list[i])
-            if token_adv_mean_list is not None and i < len(token_adv_mean_list):
-                item["token_advantage_mean"] = float(token_adv_mean_list[i])
-            samples.append(item)
-
-        payload: Dict[str, Any] = {
-            "rollout_global_step": int(getattr(self.state, "global_step", -1)),
-            "epoch": float(getattr(self.state, "epoch", 0.0) or 0.0),
-            "num_generations": int(getattr(self, "num_generations", 1)),
-            "samples": samples,
-        }
-        if reward_values is not None and sample_count > 0:
-            n = min(len(reward_values), sample_count)
-            if n > 0:
-                payload["acc"] = float(sum(float(reward_values[i]) for i in range(n)) / n)
-        self._last_rollout_snapshot = payload
 
     def _prompt_to_text(self, prompt: Any) -> str:
         text = extract_last_user_text(prompt)
@@ -500,14 +430,6 @@ class RLSDTrainer(GRPOTrainer):
             float((((token_weight > 1.0).float() * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)).item()),
         )
         self._log_masked_stats("rlsd/token_adv", token_advantages, completion_mask)
-        self._stash_rollout_for_checkpoint(
-            inputs,
-            completion_ids,
-            completion_mask,
-            reward_values=None,
-            seq_advantages_1d=seq_advantages,
-            token_advantages=token_advantages,
-        )
         return batch
 
     def _compute_loss(self, model, inputs):

@@ -369,12 +369,4 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         self._log_masked_stats("wrong_weight", wrong_weight, completion_mask)
         self._log_masked_stats("effective_delta", effective_delta, completion_mask)
         self._log_masked_stats("token_adv", token_adv, completion_mask)
-        self._stash_rollout_for_checkpoint(
-            inputs,
-            completion_ids,
-            completion_mask,
-            reward_values=rewards_binary.detach().cpu().tolist(),
-            seq_advantages_1d=seq_advantages,
-            token_advantages=token_adv,
-        )
         return batch

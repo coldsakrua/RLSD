@@ -287,12 +287,4 @@ class RLSDSignFallbackTrainer(RLSDTrainer):
             "rlsd/w_mixed_gt1_frac",
             float((((w_mixed > 1.0).float() * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)).item()),
         )
-        self._stash_rollout_for_checkpoint(
-            inputs,
-            completion_ids,
-            completion_mask,
-            reward_values=rewards_binary.detach().cpu().tolist(),
-            seq_advantages_1d=seq_advantages,
-            token_advantages=token_advantages,
-        )
         return batch

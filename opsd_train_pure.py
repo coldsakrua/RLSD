@@ -18,7 +18,6 @@ from opsd_train_anchor import (
     enforce_lora_only_trainable,
 )
 from reward_fn import configure_math_reward_extraction
-from rlsd_rollout_snapshot import SaveRolloutSnapshotCallback
 from run_logging import StructuredJsonMetricsCallback, configure_wandb_offline
 
 
@@ -76,13 +75,6 @@ def main():
                 "This can cause severe prompt truncation and off-topic generations.",
                 flush=True,
             )
-
-    setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
-    setattr(
-        training_args,
-        "rollout_snapshot_interval_steps",
-        int(script_args.rollout_snapshot_interval_steps),
-    )
 
     if script_args.generation_extra_kwargs_json and str(script_args.generation_extra_kwargs_json).strip():
         try:
@@ -225,14 +217,6 @@ def main():
     metrics_jsonl_path = logging_setup["metrics_jsonl_path"]
     trainer.add_callback(StructuredJsonMetricsCallback(metrics_jsonl_path))
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
-    if script_args.save_rollout_snapshots:
-        trainer.add_callback(SaveRolloutSnapshotCallback(trainer))
-        _iv = int(getattr(training_args, "rollout_snapshot_interval_steps", 0) or 0)
-        _extra = f" + every {_iv} steps" if _iv > 0 else ""
-        print(
-            f"[rollout_snapshot] enabled -> {training_args.output_dir}/rollout_snapshot_step_*.json "
-            f"on checkpoint save{_extra}"
-        )
 
     model_for_grad = trainer.model
     if hasattr(trainer, "accelerator"):

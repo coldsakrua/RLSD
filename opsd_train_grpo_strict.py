@@ -48,9 +48,6 @@ class ScriptArguments:
     )
 
     disable_wandb: bool = False
-    # Kept for CLI compatibility with strict RLSD script; plain GRPO trainer does not emit rollout snapshots here.
-    save_rollout_snapshots: bool = False
-    rollout_snapshot_interval_steps: int = 0
     generation_extra_kwargs_json: Optional[str] = None
 
     reward_format_penalties: bool = True
@@ -332,8 +329,6 @@ def main():
     metrics_jsonl_path = logging_setup["metrics_jsonl_path"]
     trainer.add_callback(StructuredJsonMetricsCallback(metrics_jsonl_path))
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
-    if script_args.save_rollout_snapshots:
-        print("[rollout_snapshot] skipped: plain GRPO trainer does not produce RLSD rollout snapshots.")
 
     model_for_grad = trainer.model
     if hasattr(trainer, "accelerator"):

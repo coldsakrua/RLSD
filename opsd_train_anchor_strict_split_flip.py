@@ -19,7 +19,6 @@ from reward_fn import (
     verifiable_math_reward_with_format_penalties,
 )
 from run_logging import StructuredJsonMetricsCallback, configure_wandb_offline
-from rlsd_rollout_snapshot import SaveRolloutSnapshotCallback
 from rlsd_sign_flip_strict_split_trainer import RLSDSignFlipStrictSplitTrainer
 
 
@@ -103,10 +102,6 @@ class ScriptArguments:
     )
 
     disable_wandb: bool = False
-    # When true, each checkpoint save also writes rollout_snapshot_step_*.json (last mini-batch rollout).
-    save_rollout_snapshots: bool = False
-    # Also write the same JSON every N global steps (0 = disable periodic dumps; checkpoint-only).
-    rollout_snapshot_interval_steps: int = 2
     generation_extra_kwargs_json: Optional[str] = None
 
 
@@ -248,13 +243,6 @@ def main():
         if training_args.max_completion_length is None:
             raise ValueError("When --max_length is set, --max_completion_length must also be set.")
         training_args.max_prompt_length = max(32, script_args.max_length - training_args.max_completion_length)
-
-    setattr(training_args, "save_rollout_snapshots", bool(script_args.save_rollout_snapshots))
-    setattr(
-        training_args,
-        "rollout_snapshot_interval_steps",
-        int(script_args.rollout_snapshot_interval_steps),
-    )
 
     if script_args.generation_extra_kwargs_json and str(script_args.generation_extra_kwargs_json).strip():
         try:
@@ -412,14 +400,6 @@ def main():
     metrics_jsonl_path = logging_setup["metrics_jsonl_path"]
     trainer.add_callback(StructuredJsonMetricsCallback(metrics_jsonl_path))
     print(f"[metrics] jsonl_path={metrics_jsonl_path}")
-    if script_args.save_rollout_snapshots:
-        trainer.add_callback(SaveRolloutSnapshotCallback(trainer))
-        _iv = int(getattr(training_args, "rollout_snapshot_interval_steps", 0) or 0)
-        _extra = f" + every {_iv} steps" if _iv > 0 else ""
-        print(
-            f"[rollout_snapshot] enabled -> {training_args.output_dir}/rollout_snapshot_step_*.json "
-            f"on checkpoint save{_extra}"
-        )
 
     model_for_grad = trainer.model
     if hasattr(trainer, "accelerator"):
