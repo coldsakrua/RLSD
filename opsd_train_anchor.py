@@ -97,7 +97,7 @@ class ScriptArguments:
 
     disable_wandb: bool = False
     # When true, each checkpoint save also writes rollout_snapshot_step_*.json (last mini-batch rollout).
-    save_rollout_snapshots: bool = True
+    save_rollout_snapshots: bool = False
     # Also write the same JSON every N global steps (0 = disable periodic dumps; checkpoint-only).
     rollout_snapshot_interval_steps: int = 2
     generation_extra_kwargs_json: Optional[str] = None

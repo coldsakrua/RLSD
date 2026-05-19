@@ -14,7 +14,7 @@ class SaveRolloutSnapshotCallback(TrainerCallback):
         self._trainer = trainer
 
     def _write_snapshot(self, args, state, *, trigger: str) -> None:
-        if not getattr(args, "save_rollout_snapshots", True):
+        if not getattr(args, "save_rollout_snapshots", False):
             return
         if hasattr(self._trainer, "accelerator") and not self._trainer.accelerator.is_main_process:
             return

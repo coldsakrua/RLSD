@@ -200,7 +200,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --max_steps "${MAX_STEPS}" \
     --num_generations "${NUM_GENERATIONS}" \
     --max_completion_length "${MAX_COMPLETION_LENGTH}" \
-    --save_steps 25 \
+    --save_steps 50 \
     --logging_steps 1 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \

@@ -169,7 +169,7 @@ class RLSDTrainer(GRPOTrainer):
         seq_advantages_1d: Optional[torch.Tensor] = None,
         token_advantages: Optional[torch.Tensor] = None,
     ) -> None:
-        if not getattr(self.args, "save_rollout_snapshots", True):
+        if not getattr(self.args, "save_rollout_snapshots", False):
             return
         if hasattr(self, "accelerator") and not self.accelerator.is_main_process:
             return
