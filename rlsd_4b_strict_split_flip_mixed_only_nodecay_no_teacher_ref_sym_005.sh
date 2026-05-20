@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n22,gpua800n06,gpua800n05
+#SBATCH --exclude=gpua800n21,gpua800n06
 
 # Symmetric token-gap weight clip: [0.95, 1.05] for both correct and wrong trajectories.
 set -eo pipefail
@@ -239,7 +239,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
     --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
     --fallback_tail_tokens "${FALLBACK_TAIL_TOKENS}" \
-    --strict_split_mixed_only "${STRICT_SPLIT_MIXED_ONLY}"
+    --strict_split_mixed_only "${STRICT_SPLIT_MIXED_ONLY}" \
     --reward_format_penalties "${REWARD_FORMAT_PENALTIES}" \
     --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
     --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \

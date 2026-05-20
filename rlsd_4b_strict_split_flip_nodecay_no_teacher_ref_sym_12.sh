@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH -o logs/rlsd_4b_strict_split_flip_mixed_only_nodecay_no_teacher_ref_sym.%j.out
+#SBATCH -o logs/rlsd_4b_strict_split_flip_nodecay_no_teacher_ref_sym_12.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n08,gpua800n22,gpua800n05,gpua800n06
+#SBATCH --exclude=gpua800n08,gpua800n09,gpua800n21,gpua800n06,gpua800n05
 
 #high 也是1.2
 set -eo pipefail
@@ -27,8 +27,8 @@ unset ROCR_VISIBLE_DEVICES
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_strict_split_flip_mixed_only_nodecay_no_teacher_ref_sym}
-RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_strict_split_flip_mixed_only_nodecay_no_teacher_ref_sym}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_strict_split_flip_nodecay_no_teacher_ref_sym_12}
+RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_strict_split_flip_nodecay_no_teacher_ref_sym_12}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
@@ -110,7 +110,7 @@ ALL_CORRECT_BASE_ADVANTAGE=${ALL_CORRECT_BASE_ADVANTAGE:-1.0}
 ALL_WRONG_BASE_ADVANTAGE=${ALL_WRONG_BASE_ADVANTAGE:--1.0}
 CORRECT_WEIGHT_CLIP_LOW=${CORRECT_WEIGHT_CLIP_LOW:-0.8}
 CORRECT_WEIGHT_CLIP_HIGH=${CORRECT_WEIGHT_CLIP_HIGH:-1.2}
-WRONG_WEIGHT_CLIP_LOW=${WRONG_WEIGHT_CLIP_LOW:-0.95}
+WRONG_WEIGHT_CLIP_LOW=${WRONG_WEIGHT_CLIP_LOW:-0.8}
 WRONG_WEIGHT_CLIP_HIGH=${WRONG_WEIGHT_CLIP_HIGH:-1.2}
 TEACHER_UPDATE_INTERVAL_STEPS=${TEACHER_UPDATE_INTERVAL_STEPS:-10}
 TEACHER_INCLUDE_REFERENCE_SOLUTION=${TEACHER_INCLUDE_REFERENCE_SOLUTION:-false}
@@ -120,7 +120,6 @@ SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
 ANSWER_TOKEN_DOWNWEIGHT=${ANSWER_TOKEN_DOWNWEIGHT:-1.0}
 REWARD_BINARY_THRESHOLD=${REWARD_BINARY_THRESHOLD:-0.5}
 FALLBACK_TAIL_TOKENS=${FALLBACK_TAIL_TOKENS:-8}
-STRICT_SPLIT_MIXED_ONLY=${STRICT_SPLIT_MIXED_ONLY:-true}
 REWARD_FORMAT_PENALTIES=${REWARD_FORMAT_PENALTIES:-false}
 REWARD_NO_EOS_PENALTY=${REWARD_NO_EOS_PENALTY:-0.15}
 REWARD_MULTI_BOXED_PENALTY=${REWARD_MULTI_BOXED_PENALTY:-0.15}
@@ -152,7 +151,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[ablation] strict_split_mixed_only=${STRICT_SPLIT_MIXED_ONLY} token_gap_decay_steps=${TOKEN_GAP_DECAY_STEPS}"
 echo "[ablation] teacher_include_reference_solution=${TEACHER_INCLUDE_REFERENCE_SOLUTION}"
 echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
 CUDA_VISIBLE_DEVICES="${GEN_CUDA_VISIBLE_DEVICES}" \
@@ -238,7 +236,6 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
     --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
     --fallback_tail_tokens "${FALLBACK_TAIL_TOKENS}" \
-    --strict_split_mixed_only "${STRICT_SPLIT_MIXED_ONLY}"
     --reward_format_penalties "${REWARD_FORMAT_PENALTIES}" \
     --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
     --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \

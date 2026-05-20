@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=24:00:00
-#SBATCH --exclude=gpua800n24,gpua800n23,
+
 
 set -eo pipefail
 nvidia-smi
@@ -33,7 +33,7 @@ NO_THINKING=${NO_THINKING:-1}
 datasets_csv=${DATASETS:-aime24,aime26}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict_split_flip_nodecay_no_teacher_ref_150/job_1748875/checkpoint-300}}
+checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict_split_flip_mixed_only_nodecay_no_teacher_ref/job_1752334/checkpoint-300}}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
 use_lora=${USE_LORA:-1}
 num_samples=${NUM_SAMPLES:-0}
@@ -70,7 +70,7 @@ tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-2}
 gpu_memory_utilization=${GPU_MEMORY_UTILIZATION:-0.9}
 disable_custom_all_reduce=${DISABLE_CUSTOM_ALL_REDUCE:-1}
 max_model_len=${MAX_MODEL_LEN:-40960}
-generate_batch_size=${GENERATE_BATCH_SIZE:-8}
+generate_batch_size=${GENERATE_BATCH_SIZE:-16}
 force_base_tokenizer=${FORCE_BASE_TOKENIZER:-1}
 
 stamp=$(date -u +%Y%m%d_%H%M%S)

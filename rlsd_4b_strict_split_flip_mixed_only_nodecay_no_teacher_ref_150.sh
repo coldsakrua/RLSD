@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n08,gpua800n09,gpua800n22,gpua800n05,gpua800n06
+#SBATCH --exclude=gpua800n08,gpua800n21,gpua800n06
 
 set -eo pipefail
 nvidia-smi
@@ -242,7 +242,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
     --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
     --fallback_tail_tokens "${FALLBACK_TAIL_TOKENS}" \
-    --strict_split_mixed_only "${STRICT_SPLIT_MIXED_ONLY}"
+    --strict_split_mixed_only "${STRICT_SPLIT_MIXED_ONLY}" \
     --reward_format_penalties "${REWARD_FORMAT_PENALTIES}" \
     --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
     --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \
