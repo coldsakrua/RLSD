@@ -1,12 +1,11 @@
 #!/bin/bash
-#SBATCH -o logs/eval_32k_aime24.%j.out
+#SBATCH -o logs/eval_32k_mmlu_pro.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=24:00:00
-
 
 set -eo pipefail
 nvidia-smi
@@ -30,15 +29,17 @@ model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/q
 
 # Thinking mode ON by default
 NO_THINKING=${NO_THINKING:-1}
-datasets_csv=${DATASETS:-aime24,aime26}
-data_format=${DATA_FORMAT:-auto}
-data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict_split_flip_nodecay_no_teacher_ref_sym_12/job_1752359/checkpoint-300}}
+dataset_name=${DATASET_NAME:-mmlu-pro}
+data_format=${DATA_FORMAT:-mmlu_pro_hf}
+mmlu_pro_config=${MMLU_PRO_CONFIG:-default}
+mmlu_pro_split=${MMLU_PRO_SPLIT:-test}
+checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict_split_flip_mixed_only_nodecay_no_teacher_ref/job_1752334/checkpoint-300}}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
-use_lora=${USE_LORA:-1}
+use_lora=${USE_LORA:-0}
 num_samples=${NUM_SAMPLES:-0}
 val_n=${VAL_N:-16}
 pass_at_k=${PASS_AT_K:-1,4,8,16}
+
 if [[ -n "${MAX_NEW_TOKENS:-}" ]]; then
   max_new_tokens="${MAX_NEW_TOKENS}"
 elif [[ "${NO_THINKING}" == "1" ]]; then
@@ -46,6 +47,7 @@ elif [[ "${NO_THINKING}" == "1" ]]; then
 else
   max_new_tokens=38912
 fi
+
 if [[ -n "${TEMPERATURE:-}" ]]; then
   temperature="${TEMPERATURE}"
 elif [[ "${NO_THINKING}" == "1" ]]; then
@@ -70,7 +72,7 @@ tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-2}
 gpu_memory_utilization=${GPU_MEMORY_UTILIZATION:-0.9}
 disable_custom_all_reduce=${DISABLE_CUSTOM_ALL_REDUCE:-1}
 max_model_len=${MAX_MODEL_LEN:-40960}
-generate_batch_size=${GENERATE_BATCH_SIZE:-16}
+generate_batch_size=${GENERATE_BATCH_SIZE:-32}
 force_base_tokenizer=${FORCE_BASE_TOKENIZER:-1}
 
 stamp=$(date -u +%Y%m%d_%H%M%S)
@@ -86,27 +88,28 @@ else
   _eval_cot_dir=cot
   _len_tag=38912
 fi
-output_json=${OUTPUT_JSON:-outputs/eval_32k_aime24/${_eval_cot_dir}_${_len_tag}/eval_${run_tag}.json}
+output_json=${OUTPUT_JSON:-outputs/eval_32k_mmlu_pro/${_eval_cot_dir}_${_len_tag}/eval_${run_tag}.json}
 
 mkdir -p "$(dirname "${output_json}")"
-echo "[EVAL] model_path=${model_path}"
-echo "[EVAL] checkpoint_dir=${checkpoint_dir:-<none>}"
-echo "[EVAL] USE_LORA=${use_lora} (1=use LoRA, 0=disable LoRA)"
-echo "[EVAL] DATASETS=${datasets_csv}"
-echo "[EVAL] DATA_ROOT=${data_root}"
-echo "[EVAL] NO_THINKING=${NO_THINKING} (1=no CoT, 0=CoT) -> subdir=${_eval_cot_dir}_${_len_tag}"
-echo "[EVAL] MAX_NEW_TOKENS=${max_new_tokens} (thinking=38912, no_thinking=32768)"
-echo "[EVAL] FORCE_BASE_TOKENIZER=${force_base_tokenizer} (1=base tokenizer/chat_template)"
-echo "[EVAL] MAX_MODEL_LEN=${max_model_len}"
-echo "[EVAL] DISABLE_CUSTOM_ALL_REDUCE=${disable_custom_all_reduce} (1=disable vLLM custom all-reduce)"
-echo "[EVAL] TEMPERATURE=${temperature}"
-echo "[EVAL] output_json=${output_json}"
+echo "[EVAL-MMLU-PRO] model_path=${model_path}"
+echo "[EVAL-MMLU-PRO] checkpoint_dir=${checkpoint_dir:-<none>}"
+echo "[EVAL-MMLU-PRO] USE_LORA=${use_lora} (1=use LoRA, 0=disable LoRA)"
+echo "[EVAL-MMLU-PRO] dataset=${dataset_name} format=${data_format} config=${mmlu_pro_config} split=${mmlu_pro_split}"
+echo "[EVAL-MMLU-PRO] NO_THINKING=${NO_THINKING} (1=no CoT, 0=CoT) -> subdir=${_eval_cot_dir}_${_len_tag}"
+echo "[EVAL-MMLU-PRO] MAX_NEW_TOKENS=${max_new_tokens} (thinking=38912, no_thinking=32768)"
+echo "[EVAL-MMLU-PRO] FORCE_BASE_TOKENIZER=${force_base_tokenizer} (1=base tokenizer/chat_template)"
+echo "[EVAL-MMLU-PRO] MAX_MODEL_LEN=${max_model_len}"
+echo "[EVAL-MMLU-PRO] DISABLE_CUSTOM_ALL_REDUCE=${disable_custom_all_reduce} (1=disable vLLM custom all-reduce)"
+echo "[EVAL-MMLU-PRO] TEMPERATURE=${temperature}"
+echo "[EVAL-MMLU-PRO] output_json=${output_json}"
 
 cmd=(
   python eval_math_vllm_local.py
   --model-path "${model_path}"
-  --data-root "${data_root}"
+  --dataset "${dataset_name}"
   --data-format "${data_format}"
+  --mmlu-pro-config "${mmlu_pro_config}"
+  --mmlu-pro-split "${mmlu_pro_split}"
   --output-json "${output_json}"
   --num-samples "${num_samples}"
   --val-n "${val_n}"
@@ -123,14 +126,6 @@ cmd=(
   --gpu-memory-utilization "${gpu_memory_utilization}"
   --max-model-len "${max_model_len}"
 )
-
-IFS=',' read -ra _ds <<< "${datasets_csv}"
-for _n in "${_ds[@]}"; do
-  _n="${_n#"${_n%%[![:space:]]*}"}"
-  _n="${_n%"${_n##*[![:space:]]}"}"
-  [[ -z "${_n}" ]] && continue
-  cmd+=(--dataset="${_n}")
-done
 
 if [[ "${use_lora}" == "1" ]]; then
   if [[ -n "${checkpoint_dir}" ]]; then
@@ -159,4 +154,4 @@ fi
 
 "${cmd[@]}"
 
-echo "[EVAL] done -> ${output_json}"
+echo "[EVAL-MMLU-PRO] done -> ${output_json}"
