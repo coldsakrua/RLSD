@@ -5,8 +5,7 @@ from typing import Optional
 
 import torch
 from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
-from trl import GRPOConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, TrainingArguments
 
 from data_utils import (
     DEFAULT_MATH_INSTRUCTION_SUFFIX,
@@ -70,6 +69,36 @@ class OfficialOPSDScriptArguments:
     generation_extra_kwargs_json: Optional[str] = None
 
 
+@dataclass
+class OPSDTrainingArguments(TrainingArguments):
+    """
+    TrainingArguments plus the small subset of TRL generation/vLLM knobs this
+    standalone OPSD trainer needs. This intentionally avoids GRPOConfig because
+    official OPSD samples one completion per prompt and has no GRPO advantage.
+    """
+
+    max_completion_length: int = 1024
+    max_prompt_length: Optional[int] = None
+    num_generations: int = 1
+    beta: float = 0.0
+
+    use_vllm: bool = False
+    vllm_mode: str = "server"
+    vllm_server_base_url: Optional[str] = None
+    vllm_server_host: str = "127.0.0.1"
+    vllm_server_port: int = 8000
+    vllm_server_timeout: int = 300
+    vllm_gpu_memory_utilization: float = 0.9
+    vllm_tensor_parallel_size: int = 1
+    vllm_guided_decoding_regex: Optional[str] = None
+
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: int = 0
+    min_p: float = 0.0
+    repetition_penalty: float = 1.0
+
+
 def _resolve_torch_dtype(name: Optional[str]):
     if name is None:
         return None
@@ -127,7 +156,7 @@ def _patch_qwen_thinking(tokenizer) -> None:
 
 
 def main() -> None:
-    parser = HfArgumentParser((OfficialOPSDScriptArguments, GRPOConfig))
+    parser = HfArgumentParser((OfficialOPSDScriptArguments, OPSDTrainingArguments))
     script_args, training_args = parser.parse_args_into_dataclasses()
 
     if script_args.dataset_cache_dir:
