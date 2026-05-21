@@ -683,14 +683,14 @@ def normalize_dataset_key(name: str) -> str:
     return name.strip().lower().replace("_", "-")
 
 
-def resolve_dataset_path(name: str, data_root: Path) -> Path:
+def resolve_dataset_path(name: str, data_root: Path, *, must_exist: bool = True) -> Path:
     key = normalize_dataset_key(name)
     rel = _DATASET_REL_PATH.get(key)
     if rel is None:
         known = ", ".join(sorted(set(_DATASET_REL_PATH.keys())))
         raise SystemExit(f"Unknown dataset {name!r}. Known aliases: {known}\n  (--data-root={data_root})")
     p = (data_root / rel).resolve()
-    if not p.exists():
+    if must_exist and not p.exists():
         raise FileNotFoundError(f"Dataset {name!r} -> expected path missing: {p}")
     return p
 
@@ -933,10 +933,15 @@ def main() -> None:
         else default_data_root()
     )
 
+    hf_dir_formats = {"gsm8k_hf", "mmlu_pro_hf"}
     load_queue: List[tuple[str, Optional[str]]] = []
     if args.dataset:
         for dn in args.dataset:
-            p = resolve_dataset_path(dn, data_root)
+            p = resolve_dataset_path(
+                dn,
+                data_root,
+                must_exist=args.data_format not in hf_dir_formats,
+            )
             load_queue.append((str(p), normalize_dataset_key(dn)))
     if args.data_path:
         for raw in args.data_path:
@@ -963,9 +968,16 @@ def main() -> None:
     tag_counts: Dict[str, int] = {}
     for raw, tag_override in load_queue:
         data_path = Path(raw).expanduser().resolve()
-        if args.data_format in {"gsm8k_hf", "mmlu_pro_hf"}:
+        if args.data_format in hf_dir_formats:
             if not data_path.exists():
-                raise FileNotFoundError(data_path)
+                if args.data_format == "mmlu_pro_hf":
+                    print(
+                        f"[warn] MMLU-Pro local dir missing ({data_path}); "
+                        "will load from HuggingFace hub (TIGER-Lab/MMLU-Pro).",
+                        flush=True,
+                    )
+                else:
+                    raise FileNotFoundError(data_path)
         else:
             if not data_path.is_file():
                 raise FileNotFoundError(data_path)

@@ -33,9 +33,15 @@ dataset_name=${DATASET_NAME:-mmlu-pro}
 data_format=${DATA_FORMAT:-mmlu_pro_hf}
 mmlu_pro_config=${MMLU_PRO_CONFIG:-default}
 mmlu_pro_split=${MMLU_PRO_SPLIT:-test}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict_split_flip_mixed_only_nodecay_no_teacher_ref/job_1752334/checkpoint-300}}
+# MMLU-Pro HF snapshot lives under preference_learning/data by default
+_pl_mmlu_data="/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data"
+data_root=${DATA_ROOT:-${BASE_DIR}/data}
+if [[ ! -d "${data_root}/mmlu-pro" && -d "${_pl_mmlu_data}/mmlu-pro" ]]; then
+  data_root="${_pl_mmlu_data}"
+fi
+checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_4b_strict_split_flip_nodecay_no_teacher_ref/job_1746710/checkpoint-300}}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
-use_lora=${USE_LORA:-0}
+use_lora=${USE_LORA:-1}
 num_samples=${NUM_SAMPLES:-0}
 val_n=${VAL_N:-16}
 pass_at_k=${PASS_AT_K:-1,4,8,16}
@@ -95,6 +101,7 @@ echo "[EVAL-MMLU-PRO] model_path=${model_path}"
 echo "[EVAL-MMLU-PRO] checkpoint_dir=${checkpoint_dir:-<none>}"
 echo "[EVAL-MMLU-PRO] USE_LORA=${use_lora} (1=use LoRA, 0=disable LoRA)"
 echo "[EVAL-MMLU-PRO] dataset=${dataset_name} format=${data_format} config=${mmlu_pro_config} split=${mmlu_pro_split}"
+echo "[EVAL-MMLU-PRO] data_root=${data_root}"
 echo "[EVAL-MMLU-PRO] NO_THINKING=${NO_THINKING} (1=no CoT, 0=CoT) -> subdir=${_eval_cot_dir}_${_len_tag}"
 echo "[EVAL-MMLU-PRO] MAX_NEW_TOKENS=${max_new_tokens} (thinking=38912, no_thinking=32768)"
 echo "[EVAL-MMLU-PRO] FORCE_BASE_TOKENIZER=${force_base_tokenizer} (1=base tokenizer/chat_template)"
@@ -107,6 +114,7 @@ cmd=(
   python eval_math_vllm_local.py
   --model-path "${model_path}"
   --dataset "${dataset_name}"
+  --data-root "${data_root}"
   --data-format "${data_format}"
   --mmlu-pro-config "${mmlu_pro_config}"
   --mmlu-pro-split "${mmlu_pro_split}"

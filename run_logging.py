@@ -95,6 +95,85 @@ def _json_dump(path: str, payload: Dict[str, Any]) -> None:
         f.write("\n")
 
 
+def install_fixed_wandb_step_logging() -> None:
+    """Bind wandb _step to Trainer global_step (e.g. 300), not internal log commit count."""
+    try:
+        from transformers.integrations.integration_utils import WandbCallback, rewrite_logs
+    except ImportError:
+        return
+
+    if getattr(WandbCallback, "_rlsd_fixed_step", False):
+        return
+
+    _orig_setup = WandbCallback.setup
+
+    def setup(self, args, state, model, **kwargs):
+        _orig_setup(self, args, state, model, **kwargs)
+        if self._wandb is not None and getattr(self._wandb, "define_metric", None):
+            # Override HF step_sync on train/global_step (was ~31 internal commits per step).
+            self._wandb.define_metric("train/global_step", hidden=True)
+            self._wandb.define_metric("*", step_metric="_step")
+
+    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
+        single_value_scalars = [
+            "train_runtime",
+            "train_samples_per_second",
+            "train_steps_per_second",
+            "train_loss",
+            "total_flos",
+        ]
+
+        if self._wandb is None:
+            return
+        if not self._initialized:
+            self.setup(args, state, model)
+        if not state.is_world_process_zero or not logs:
+            return
+
+        for k, v in logs.items():
+            if k in single_value_scalars:
+                self._wandb.run.summary[k] = v
+        non_scalar_logs = {k: v for k, v in logs.items() if k not in single_value_scalars}
+        non_scalar_logs = rewrite_logs(non_scalar_logs)
+        if not non_scalar_logs:
+            return
+        step = int(state.global_step)
+        self._wandb.log(non_scalar_logs, step=step, commit=True)
+
+    WandbCallback.setup = setup
+    WandbCallback._rlsd_fixed_step = True
+
+    try:
+        import wandb as wb
+    except ImportError:
+        return
+
+    if getattr(wb.log, "_rlsd_fixed_step", False):
+        return
+
+    _orig_wb_log = wb.log
+    _current_global_step: Dict[str, Optional[int]] = {"value": None}
+
+    def _patched_wb_log(data, step=None, commit=None, **kwargs):
+        if step is None and _current_global_step["value"] is not None:
+            step = _current_global_step["value"]
+        if commit is None:
+            commit = True
+        return _orig_wb_log(data, step=step, commit=commit, **kwargs)
+
+    _patched_wb_log._rlsd_fixed_step = True
+    wb.log = _patched_wb_log
+
+    _orig_on_log = on_log
+
+    def on_log_with_step_ctx(self, args, state, control, model=None, logs=None, **kwargs):
+        if state.is_world_process_zero:
+            _current_global_step["value"] = int(state.global_step)
+        return _orig_on_log(self, args, state, control, model=model, logs=logs, **kwargs)
+
+    WandbCallback.on_log = on_log_with_step_ctx
+
+
 def configure_wandb_offline(
     training_args,
     *,
@@ -131,6 +210,7 @@ def configure_wandb_offline(
 
     # Ensure W&B is enabled and fully local by default.
     os.environ.pop("WANDB_DISABLED", None)
+    os.environ.setdefault("WANDB_WATCH", "false")
     os.environ.setdefault("WANDB_MODE", "offline")
     os.environ.setdefault("WANDB_PROJECT", default_project)
     os.environ.setdefault("WANDB_DIR", output_dir)
@@ -184,6 +264,8 @@ def configure_wandb_offline(
     if extra_meta:
         payload["extra"] = extra_meta
     _json_dump(meta_path, payload)
+
+    install_fixed_wandb_step_logging()
 
     return {"output_dir": output_dir, "metrics_jsonl_path": metrics_jsonl_path, "meta_path": meta_path}
 
