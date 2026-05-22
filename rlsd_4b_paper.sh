@@ -1,12 +1,19 @@
 #!/bin/bash
-#SBATCH -o logs/rlsd_8b.%j.out
+#SBATCH -o logs/rlsd_4b_paper.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n26,gpua800n15,gpua800n11
+#SBATCH --exclude=gpua800n07,gpua800n04,gpua800n15,gpua800n26
+#
+# Canonical RLSD (arXiv:2604.03128 Algorithm 1 / Eq. 14-16):
+#   - Trainer: RLSDTrainer (opsd_train_anchor.py, use_sign_constrained_fallback=false)
+#   - Token credit: w_t = exp(sign(A) * (log P_T - log P_S)), clip to [1-eps_w, 1+eps_w]
+#   - A_hat_t = A * ((1-lambda) + lambda * w_t), lambda linear decay (no all-correct/all-wrong fallback)
+# Infrastructure / LR / data / generation match rlsd_4b.sh — see header comment vs rlsd_4b.sh below.
+#
 set -eo pipefail
 nvidia-smi
 
@@ -22,11 +29,11 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset ROCR_VISIBLE_DEVICES
 
-MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-8b}
+MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_8b}
-RUN_CONFIG=${RUN_CONFIG:-rlsd_8b}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_paper}
+RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_paper}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
@@ -42,7 +49,6 @@ GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
 PER_DEVICE_BS=${PER_DEVICE_BS:-2}
 MAX_STEPS=${MAX_STEPS:-300}
 MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
-# Keep enough prompt budget: trainer computes max_prompt_length = max_length - max_completion_length.
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_LENGTH=$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))
 PROMPT_PREFIX=${PROMPT_PREFIX:-}
@@ -70,12 +76,11 @@ if [ -n "${LR_SCHEDULER_KWARGS}" ]; then
     TRAIN_LR_ARGS+=(--lr_scheduler_kwargs "${LR_SCHEDULER_KWARGS}")
 fi
 
-# Effective warmup steps for logging only (HuggingFace: warmup_steps = floor(max_steps * warmup_ratio)).
 if [ "${WARMUP_STEPS:-0}" != "0" ]; then
     _WU_DESC="warmup_steps=${WARMUP_STEPS}"
 elif [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
     _WU_STEPS=$(awk -v ms="${MAX_STEPS}" -v r="${WARMUP_RATIO}" 'BEGIN { printf "%d", int(ms * r) }')
-    _WU_DESC="warmup_ratio=${WARMUP_RATIO} �?~${_WU_STEPS} optimizer steps (max_steps=${MAX_STEPS})"
+    _WU_DESC="warmup_ratio=${WARMUP_RATIO} -> ~${_WU_STEPS} optimizer steps (max_steps=${MAX_STEPS})"
 else
     _WU_DESC="no warmup"
 fi
@@ -100,25 +105,16 @@ VLLM_SERVER_BASE_URL=${VLLM_SERVER_BASE_URL:-http://${VLLM_SERVER_HOST}:${VLLM_S
 VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
 VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
 
+# --- RLSD objective (paper) — same numeric defaults as rlsd_4b.sh ---
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
 LMBDA=${LMBDA:-0.5}
 LMBDA_DECAY_STEPS=${LMBDA_DECAY_STEPS:-50}
 JSD_TOKEN_CLIP=${JSD_TOKEN_CLIP:-0.2}
-
-LAMBDA_PLUS=${LAMBDA_PLUS:-0.3}
-LAMBDA_MINUS=${LAMBDA_MINUS:-0.3}
-LAMBDA_PLUS_MIN=${LAMBDA_PLUS_MIN:-0.0}
-LAMBDA_MINUS_MIN=${LAMBDA_MINUS_MIN:-0.0}
-FALLBACK_DECAY_STEPS=${FALLBACK_DECAY_STEPS:-50}
-FALLBACK_EPS0=${FALLBACK_EPS0:-0.05}
 TEACHER_UPDATE_INTERVAL_STEPS=${TEACHER_UPDATE_INTERVAL_STEPS:-10}
-ADV_CLIP_LOW=${ADV_CLIP_LOW:--1.0}
-ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.0}
-SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
-ANSWER_TOKEN_DOWNWEIGHT=${ANSWER_TOKEN_DOWNWEIGHT:-1.0}
-REWARD_BINARY_THRESHOLD=${REWARD_BINARY_THRESHOLD:-0.5}
-USE_SIGN_CONSTRAINED_FALLBACK=${USE_SIGN_CONSTRAINED_FALLBACK:-true}
-FALLBACK_TAIL_TOKENS=${FALLBACK_TAIL_TOKENS:-8}
+
+# Paper path: no sign-constrained fallback (do not enable without knowing you leave Algorithm 1).
+USE_SIGN_CONSTRAINED_FALLBACK=${USE_SIGN_CONSTRAINED_FALLBACK:-false}
+
 REWARD_FORMAT_PENALTIES=${REWARD_FORMAT_PENALTIES:-false}
 REWARD_NO_EOS_PENALTY=${REWARD_NO_EOS_PENALTY:-0.15}
 REWARD_MULTI_BOXED_PENALTY=${REWARD_MULTI_BOXED_PENALTY:-0.15}
@@ -140,6 +136,11 @@ if [ "${TRAIN_CUDA_VISIBLE_DEVICES}" = "${GEN_CUDA_VISIBLE_DEVICES}" ]; then
     exit 1
 fi
 
+if [ "${USE_SIGN_CONSTRAINED_FALLBACK}" = "true" ]; then
+    echo "[warn] USE_SIGN_CONSTRAINED_FALLBACK=true enables RLSDSignFallbackTrainer (not paper Algorithm 1)."
+    echo "[warn] For canonical RLSD use: USE_SIGN_CONSTRAINED_FALLBACK=false (default in rlsd_4b_paper.sh)."
+fi
+
 VLLM_SERVER_LOG="${OUTPUT_DIR}/vllm_server.log"
 VLLM_SERVER_PID=""
 cleanup() {
@@ -150,6 +151,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "[rlsd_paper] trainer=RLSDTrainer fallback=${USE_SIGN_CONSTRAINED_FALLBACK} lmbda=${LMBDA} decay=${LMBDA_DECAY_STEPS} eps_w=${JSD_TOKEN_CLIP}"
 echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
 CUDA_VISIBLE_DEVICES="${GEN_CUDA_VISIBLE_DEVICES}" \
 PYTORCH_CUDA_ALLOC_CONF="" \
@@ -223,18 +225,6 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --jsd_token_clip "${JSD_TOKEN_CLIP}" \
     --rollout_filter "${ROLLOUT_FILTER}" \
     --use_sign_constrained_fallback "${USE_SIGN_CONSTRAINED_FALLBACK}" \
-    --lambda_plus "${LAMBDA_PLUS}" \
-    --lambda_minus "${LAMBDA_MINUS}" \
-    --lambda_plus_min "${LAMBDA_PLUS_MIN}" \
-    --lambda_minus_min "${LAMBDA_MINUS_MIN}" \
-    --fallback_decay_steps "${FALLBACK_DECAY_STEPS}" \
-    --fallback_eps0 "${FALLBACK_EPS0}" \
-    --adv_clip_low "${ADV_CLIP_LOW}" \
-    --adv_clip_high "${ADV_CLIP_HIGH}" \
-    --suppress_gt_shortcut "${SUPPRESS_GT_SHORTCUT}" \
-    --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
-    --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
-    --fallback_tail_tokens "${FALLBACK_TAIL_TOKENS}" \
     --reward_format_penalties "${REWARD_FORMAT_PENALTIES}" \
     --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
     --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \

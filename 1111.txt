@@ -1,0 +1,2 @@
+1.opsd pure是grpo+opsd版本
+2.rlsd_xb是在fallback的，也就是在全对全错组也更新
