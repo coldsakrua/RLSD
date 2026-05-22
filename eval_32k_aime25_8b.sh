@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o logs/eval_32k_aime24.%j.out
+#SBATCH -o logs/eval_32k_aime25_8b.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -26,16 +26,16 @@ export VLLM_HOST_IP=127.0.0.1
 export TORCH_CUDA_ARCH_LIST=8.0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
-model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
+model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-8b}
 
 # Thinking mode ON by default
 NO_THINKING=${NO_THINKING:-1}
-datasets_csv=${DATASETS:-aime24,aime26}
+datasets_csv=${DATASETS:-aime25}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/opsd_4b/job_1761747/checkpoint-300}}
+checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_8b/job_1761968/checkpoint-300}}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
-use_lora=${USE_LORA:-1}
+use_lora=${USE_LORA:-0}
 num_samples=${NUM_SAMPLES:-0}
 val_n=${VAL_N:-16}
 pass_at_k=${PASS_AT_K:-1,4,8,16}
@@ -86,7 +86,7 @@ else
   _eval_cot_dir=cot
   _len_tag=38912
 fi
-output_json=${OUTPUT_JSON:-outputs/eval_32k_aime24/${_eval_cot_dir}_${_len_tag}/eval_${run_tag}.json}
+output_json=${OUTPUT_JSON:-outputs/eval_32k_aime25_8b/${_eval_cot_dir}_${_len_tag}/eval_${run_tag}.json}
 
 mkdir -p "$(dirname "${output_json}")"
 echo "[EVAL] model_path=${model_path}"

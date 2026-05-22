@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n24,gpua800n04,gpua800n03,gpua800n21,gpua800n25
+#SBATCH --exclude=gpua800n06,gpua800n04
 set -eo pipefail
 nvidia-smi
 
