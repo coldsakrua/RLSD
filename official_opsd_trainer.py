@@ -642,6 +642,34 @@ class OfficialOPSDTrainer(Trainer):
             "completion_mask": completion_mask,
         }
 
+    def _model_forward(
+        self,
+        model,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        logits_to_keep: int,
+    ):
+        """
+        Qwen3/Transformers can return only the last N logits via ``logits_to_keep``.
+        OPSD only needs completion-token logits, so this avoids materializing
+        prompt-token vocab logits. Older model classes that do not support the
+        kwarg fall back to the normal full-logits forward.
+        """
+        kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+        if logits_to_keep > 0:
+            kwargs["logits_to_keep"] = int(logits_to_keep)
+            try:
+                return model(**kwargs)
+            except TypeError as exc:
+                if "logits_to_keep" not in str(exc):
+                    raise
+                kwargs.pop("logits_to_keep", None)
+        return model(**kwargs)
+
     @staticmethod
     def _gather_token_logits(logits: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         vocab_size = logits.size(-1)
@@ -649,16 +677,47 @@ class OfficialOPSDTrainer(Trainer):
         index = positions.unsqueeze(-1).expand(-1, -1, vocab_size)
         return torch.gather(logits, dim=1, index=index)
 
+    def _forward_and_gather_token_logits(
+        self,
+        model,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        positions: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        valid_positions = positions[labels != -100]
+        if valid_positions.numel() == 0:
+            logits_to_keep = 1
+        else:
+            min_position = int(valid_positions.min().item())
+            logits_to_keep = int(input_ids.size(1)) - min_position
+            logits_to_keep = max(1, min(int(input_ids.size(1)), logits_to_keep))
+
+        outputs = self._model_forward(
+            model,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            logits_to_keep=logits_to_keep,
+        )
+        logits = outputs.logits
+        window_start = int(input_ids.size(1)) - int(logits.size(1))
+        relative_positions = positions - window_start
+        gathered = self._gather_token_logits(logits, relative_positions)
+        del outputs
+        return gathered
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs["labels"]
         completion_mask = inputs["completion_mask"]
 
-        outputs_student = model(
+        student_logits = self._forward_and_gather_token_logits(
+            model,
             input_ids=inputs["student_input_ids"],
             attention_mask=inputs["student_attention_mask"],
+            positions=inputs["student_positions"],
+            labels=labels,
         )
-        student_logits = self._gather_token_logits(outputs_student.logits, inputs["student_positions"])
-        del outputs_student
         _empty_cache()
 
         unwrapped = self.accelerator.unwrap_model(model)
@@ -668,12 +727,13 @@ class OfficialOPSDTrainer(Trainer):
             adapter_context = nullcontext()
 
         with torch.no_grad(), adapter_context:
-            outputs_teacher = model(
+            teacher_logits = self._forward_and_gather_token_logits(
+                model,
                 input_ids=inputs["teacher_input_ids"],
                 attention_mask=inputs["teacher_attention_mask"],
+                positions=inputs["teacher_positions"],
+                labels=labels,
             )
-            teacher_logits = self._gather_token_logits(outputs_teacher.logits, inputs["teacher_positions"])
-            del outputs_teacher
         _empty_cache()
 
         loss = self.generalized_jsd_loss(
