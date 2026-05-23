@@ -11,3 +11,4 @@ wandb_jsonl_replay/
 wandb/
 scripts/
 wandbsync.sh
+*.tex

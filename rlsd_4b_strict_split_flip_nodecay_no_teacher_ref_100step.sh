@@ -1,16 +1,13 @@
 #!/bin/bash
-#SBATCH -o logs/rlsd_1_7b_paper.%j.out
+#SBATCH -o logs/rlsd_4b_strict_split_flip_nodecay_no_teacher_ref_100step.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n15,gpua800n07
-#
-# Canonical RLSD (arXiv:2604.03128 Algorithm 1). Same as rlsd_4b_paper.sh; infra matches rlsd_1_7b.sh.
-#   - RLSDTrainer, use_sign_constrained_fallback=false (no all-correct/all-wrong fallback)
-#
+#SBATCH --exclude=gpua800n15,gpua800n10,gpua800n14,gpua800n09
+
 set -eo pipefail
 nvidia-smi
 
@@ -26,11 +23,11 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset ROCR_VISIBLE_DEVICES
 
-MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-1.7b}
+MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_1_7b_paper}
-RUN_CONFIG=${RUN_CONFIG:-rlsd_1_7b_paper}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_strict_split_flip_nodecay_no_teacher_ref_100step}
+RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_strict_split_flip_nodecay_no_teacher_ref_100step}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
@@ -44,8 +41,9 @@ mkdir -p "${WANDB_DATA_DIR}"
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
 PER_DEVICE_BS=${PER_DEVICE_BS:-2}
-MAX_STEPS=${MAX_STEPS:-300}
+MAX_STEPS=${MAX_STEPS:-100}
 MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
+# Keep enough prompt budget: trainer computes max_prompt_length = max_length - max_completion_length.
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_LENGTH=$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))
 PROMPT_PREFIX=${PROMPT_PREFIX:-}
@@ -73,11 +71,12 @@ if [ -n "${LR_SCHEDULER_KWARGS}" ]; then
     TRAIN_LR_ARGS+=(--lr_scheduler_kwargs "${LR_SCHEDULER_KWARGS}")
 fi
 
+# Effective warmup steps for logging only (HuggingFace: warmup_steps = floor(max_steps * warmup_ratio)).
 if [ "${WARMUP_STEPS:-0}" != "0" ]; then
     _WU_DESC="warmup_steps=${WARMUP_STEPS}"
 elif [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
     _WU_STEPS=$(awk -v ms="${MAX_STEPS}" -v r="${WARMUP_RATIO}" 'BEGIN { printf "%d", int(ms * r) }')
-    _WU_DESC="warmup_ratio=${WARMUP_RATIO} -> ~${_WU_STEPS} optimizer steps (max_steps=${MAX_STEPS})"
+    _WU_DESC="warmup_ratio=${WARMUP_RATIO} → ~${_WU_STEPS} optimizer steps (max_steps=${MAX_STEPS})"
 else
     _WU_DESC="no warmup"
 fi
@@ -103,12 +102,23 @@ VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
 VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
 
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
-LMBDA=${LMBDA:-0.5}
-LMBDA_DECAY_STEPS=${LMBDA_DECAY_STEPS:-50}
-JSD_TOKEN_CLIP=${JSD_TOKEN_CLIP:-0.2}
-TEACHER_UPDATE_INTERVAL_STEPS=${TEACHER_UPDATE_INTERVAL_STEPS:-10}
-USE_SIGN_CONSTRAINED_FALLBACK=${USE_SIGN_CONSTRAINED_FALLBACK:-false}
+TOKEN_GAP_LAMBDA=${TOKEN_GAP_LAMBDA:-1.0}
+TOKEN_GAP_DECAY_STEPS=${TOKEN_GAP_DECAY_STEPS:-0}
 
+ALL_CORRECT_BASE_ADVANTAGE=${ALL_CORRECT_BASE_ADVANTAGE:-1.0}
+ALL_WRONG_BASE_ADVANTAGE=${ALL_WRONG_BASE_ADVANTAGE:--1.0}
+CORRECT_WEIGHT_CLIP_LOW=${CORRECT_WEIGHT_CLIP_LOW:-0.8}
+CORRECT_WEIGHT_CLIP_HIGH=${CORRECT_WEIGHT_CLIP_HIGH:-1.05}
+WRONG_WEIGHT_CLIP_LOW=${WRONG_WEIGHT_CLIP_LOW:-0.95}
+WRONG_WEIGHT_CLIP_HIGH=${WRONG_WEIGHT_CLIP_HIGH:-1.2}
+TEACHER_UPDATE_INTERVAL_STEPS=${TEACHER_UPDATE_INTERVAL_STEPS:-10}
+TEACHER_INCLUDE_REFERENCE_SOLUTION=${TEACHER_INCLUDE_REFERENCE_SOLUTION:-false}
+ADV_CLIP_LOW=${ADV_CLIP_LOW:--1.2}
+ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.2}
+SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
+ANSWER_TOKEN_DOWNWEIGHT=${ANSWER_TOKEN_DOWNWEIGHT:-1.0}
+REWARD_BINARY_THRESHOLD=${REWARD_BINARY_THRESHOLD:-0.5}
+FALLBACK_TAIL_TOKENS=${FALLBACK_TAIL_TOKENS:-8}
 REWARD_FORMAT_PENALTIES=${REWARD_FORMAT_PENALTIES:-false}
 REWARD_NO_EOS_PENALTY=${REWARD_NO_EOS_PENALTY:-0.15}
 REWARD_MULTI_BOXED_PENALTY=${REWARD_MULTI_BOXED_PENALTY:-0.15}
@@ -130,11 +140,6 @@ if [ "${TRAIN_CUDA_VISIBLE_DEVICES}" = "${GEN_CUDA_VISIBLE_DEVICES}" ]; then
     exit 1
 fi
 
-if [ "${USE_SIGN_CONSTRAINED_FALLBACK}" = "true" ]; then
-    echo "[warn] USE_SIGN_CONSTRAINED_FALLBACK=true enables RLSDSignFallbackTrainer (not paper Algorithm 1)."
-    echo "[warn] For canonical RLSD use: USE_SIGN_CONSTRAINED_FALLBACK=false (default in rlsd_1_7b_paper.sh)."
-fi
-
 VLLM_SERVER_LOG="${OUTPUT_DIR}/vllm_server.log"
 VLLM_SERVER_PID=""
 cleanup() {
@@ -145,7 +150,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[rlsd_paper] model=1.7b trainer=RLSDTrainer fallback=${USE_SIGN_CONSTRAINED_FALLBACK} lmbda=${LMBDA} decay=${LMBDA_DECAY_STEPS} eps_w=${JSD_TOKEN_CLIP}"
+echo "[ablation] teacher_include_reference_solution=${TEACHER_INCLUDE_REFERENCE_SOLUTION}"
 echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
 CUDA_VISIBLE_DEVICES="${GEN_CUDA_VISIBLE_DEVICES}" \
 PYTORCH_CUDA_ALLOC_CONF="" \
@@ -169,7 +174,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --num_processes 1 \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --main_process_port "${MAIN_PROCESS_PORT}" \
-    opsd_train_anchor.py \
+    opsd_train_anchor_strict_split_flip.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
     --dataset_split train \
@@ -212,13 +217,24 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --repetition_penalty "${REPETITION_PENALTY}" \
     --generation_extra_kwargs_json "${GENERATION_KWARGS}" \
     --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
-    --lmbda "${LMBDA}" \
-    --lmbda_decay_steps "${LMBDA_DECAY_STEPS}" \
+    --token_gap_lambda "${TOKEN_GAP_LAMBDA}" \
+    --token_gap_decay_steps "${TOKEN_GAP_DECAY_STEPS}" \
     --fixed_teacher false \
     --teacher_update_interval_steps "${TEACHER_UPDATE_INTERVAL_STEPS}" \
-    --jsd_token_clip "${JSD_TOKEN_CLIP}" \
+    --teacher_include_reference_solution "${TEACHER_INCLUDE_REFERENCE_SOLUTION}" \
     --rollout_filter "${ROLLOUT_FILTER}" \
-    --use_sign_constrained_fallback "${USE_SIGN_CONSTRAINED_FALLBACK}" \
+    --all_correct_base_advantage "${ALL_CORRECT_BASE_ADVANTAGE}" \
+    --all_wrong_base_advantage "${ALL_WRONG_BASE_ADVANTAGE}" \
+    --correct_weight_clip_low "${CORRECT_WEIGHT_CLIP_LOW}" \
+    --correct_weight_clip_high "${CORRECT_WEIGHT_CLIP_HIGH}" \
+    --wrong_weight_clip_low "${WRONG_WEIGHT_CLIP_LOW}" \
+    --wrong_weight_clip_high "${WRONG_WEIGHT_CLIP_HIGH}" \
+    --adv_clip_low "${ADV_CLIP_LOW}" \
+    --adv_clip_high "${ADV_CLIP_HIGH}" \
+    --suppress_gt_shortcut "${SUPPRESS_GT_SHORTCUT}" \
+    --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
+    --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
+    --fallback_tail_tokens "${FALLBACK_TAIL_TOKENS}" \
     --reward_format_penalties "${REWARD_FORMAT_PENALTIES}" \
     --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
     --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \

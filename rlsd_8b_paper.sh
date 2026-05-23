@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n26,gpua800n15,gpua800n11
+#SBATCH --exclude=gpua800n15,gpua800n10,gpua800n26,gpua800n07
 #
 # Canonical RLSD (arXiv:2604.03128 Algorithm 1). Same as rlsd_4b_paper.sh; infra matches rlsd_8b.sh.
 #   - RLSDTrainer, use_sign_constrained_fallback=false (no all-correct/all-wrong fallback)
