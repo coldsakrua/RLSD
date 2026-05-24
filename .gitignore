@@ -12,3 +12,4 @@ wandb/
 scripts/
 wandbsync.sh
 *.tex
+paper/

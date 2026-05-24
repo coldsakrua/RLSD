@@ -6,6 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
+#SBATCH --exclude=gpua800n15,gpua800n05
 
 set -eo pipefail
 nvidia-smi
@@ -51,9 +52,9 @@ NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUF
 MATH_INSTRUCTION_SUFFIX=${MATH_INSTRUCTION_SUFFIX:-}
 USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-true}
 
-# RLRT paper defaults for base models where they do not affect memory:
-# lr=1e-6, weight_decay=0.01, warmup_steps=10, temperature=1.0,
-# lambda_init=0.5, epsilon_w=1.0, no lambda decay, current-policy teacher scoring.
+# Paper Table 5 (RLRT): lr=1e-6, weight_decay=0.01, warmup_steps=10, rollout T=1.0,
+#   lambda_init=0.5, epsilon_w=1.0, no lambda decay, current-policy teacher.
+# Where the paper is silent (e.g. LR scheduler), use repo defaults below.
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
 WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 WARMUP_RATIO=${WARMUP_RATIO:-}
@@ -88,14 +89,19 @@ fi
 
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.9}
+# Training rollout: paper specifies temperature=1.0 only (eval uses T=0.7, top_p=0.8).
 TEMPERATURE=${TEMPERATURE:-1.0}
-TOP_P=${TOP_P:-0.95}
+TOP_P=${TOP_P:-1.0}
 TOP_K=${TOP_K:-20}
 MIN_P=${MIN_P:-0.0}
 REPETITION_PENALTY=${REPETITION_PENALTY:-1.0}
-PRESENCE_PENALTY=${PRESENCE_PENALTY:-0.2}
+PRESENCE_PENALTY=${PRESENCE_PENALTY:-0.0}
 if [ -z "${GENERATION_KWARGS+x}" ]; then
+  if [ "${PRESENCE_PENALTY}" != "0" ] && [ "${PRESENCE_PENALTY}" != "0.0" ]; then
     GENERATION_KWARGS="{\"presence_penalty\":${PRESENCE_PENALTY}}"
+  else
+    GENERATION_KWARGS="{}"
+  fi
 fi
 MASK_TRUNCATED_COMPLETIONS=${MASK_TRUNCATED_COMPLETIONS:-true}
 TRAIN_CUDA_VISIBLE_DEVICES=${TRAIN_CUDA_VISIBLE_DEVICES:-0}
@@ -136,7 +142,7 @@ REWARD_REPEAT_TRIPLET_LEV_THRESHOLD=${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD:-0}
 DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}
 REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
 DAPO_EPSILON=${DAPO_EPSILON:-0.2}
-DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-}
+DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.28}
 
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"q_proj k_proj v_proj o_proj gate_proj up_proj down_proj"}
 LORA_R=${LORA_R:-64}
