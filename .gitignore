@@ -13,3 +13,4 @@ scripts/
 wandbsync.sh
 *.tex
 paper/
+results/
