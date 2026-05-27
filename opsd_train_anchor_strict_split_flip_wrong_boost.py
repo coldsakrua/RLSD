@@ -73,6 +73,8 @@ class ScriptArguments:
     fallback_tail_tokens: int = 8
     # Mixed-only ablation: all-correct/all-wrong prompt groups are counted but get zero token feedback.
     strict_split_mixed_only: bool = False
+    # After token_gap decay (lambda=0): skip teacher token-gap; mixed groups use GRPO only.
+    strict_split_grpo_mixed_only_after_decay: bool = False
     # Penalties applied on top of correctness (see reward_fn.verifiable_math_reward_with_format_penalties).
     # Disabled by default: use pure correctness reward (no format/repetition penalties).
     reward_format_penalties: bool = False
@@ -395,6 +397,7 @@ def main():
         reward_binary_threshold=script_args.reward_binary_threshold,
         fallback_tail_tokens=script_args.fallback_tail_tokens,
         strict_split_mixed_only=script_args.strict_split_mixed_only,
+        strict_split_grpo_mixed_only_after_decay=script_args.strict_split_grpo_mixed_only_after_decay,
     )
 
     metrics_jsonl_path = logging_setup["metrics_jsonl_path"]

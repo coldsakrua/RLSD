@@ -11,7 +11,28 @@ class RLSDSignFlipWrongBoostStrictSplitTrainer(RLSDSignFlipStrictSplitTrainer):
     Ablation on top of strict-split sign-flip OPSD:
     - keeps correct-path flip: base_adv > 0 and g < 0 -> negative advantage
     - adds wrong-path flip: base_adv < 0 and g > 0 (teacher prefers higher prob) -> positive advantage
+    - optional strict_split_grpo_mixed_only_after_decay: before token_gap decay, full OPSD on all
+      groups; after decay (lambda=0), skip teacher token-gap and update mixed groups with GRPO only.
     """
+
+    def __init__(
+        self,
+        *args,
+        strict_split_grpo_mixed_only_after_decay: bool = False,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.strict_split_grpo_mixed_only_after_decay = bool(strict_split_grpo_mixed_only_after_decay)
+
+    def _in_grpo_mixed_only_phase(self, lambda_now: float) -> bool:
+        return bool(
+            self.strict_split_grpo_mixed_only_after_decay
+            and self.lmbda_decay_steps > 0
+            and lambda_now <= 1e-12
+        )
+
+    def _effective_mixed_only(self, lambda_now: float) -> bool:
+        return bool(self.strict_split_mixed_only or self._in_grpo_mixed_only_phase(lambda_now))
 
     def _shape_with_token_gap_wrong_boost(
         self,
@@ -93,13 +114,20 @@ class RLSDSignFlipWrongBoostStrictSplitTrainer(RLSDSignFlipStrictSplitTrainer):
             return batch
 
         student_logps = self._compute_student_logps(batch)
-        teacher_prompts = self._expand_to_samples(self._build_teacher_prompts(inputs), sample_count)
-        teacher_logps = self._compute_teacher_logps_strict(
-            completion_ids=completion_ids,
-            completion_mask=completion_mask,
-            teacher_prompts=teacher_prompts,
-        )
-        g = (teacher_logps - student_logps).detach() * completion_mask
+        lambda_now = self._current_lambda()
+        grpo_mixed_only_phase = self._in_grpo_mixed_only_phase(lambda_now)
+        mixed_only_now = self._effective_mixed_only(lambda_now)
+
+        if grpo_mixed_only_phase:
+            g = torch.zeros_like(student_logps)
+        else:
+            teacher_prompts = self._expand_to_samples(self._build_teacher_prompts(inputs), sample_count)
+            teacher_logps = self._compute_teacher_logps_strict(
+                completion_ids=completion_ids,
+                completion_mask=completion_mask,
+                teacher_prompts=teacher_prompts,
+            )
+            g = (teacher_logps - student_logps).detach() * completion_mask
 
         snap_mask = self._completion_mask_through_first_eos(completion_ids)
         completion_texts = self._decode_completion_texts(completion_ids, snap_mask)
@@ -130,22 +158,29 @@ class RLSDSignFlipWrongBoostStrictSplitTrainer(RLSDSignFlipStrictSplitTrainer):
         mixed_correct = mixed & sample_correct
         mixed_wrong = mixed & sample_wrong
 
-        lambda_now = self._current_lambda()
         if abs(float(self.lmbda)) <= 1e-12:
             fallback_base_scale = 0.0
         else:
             fallback_base_scale = abs(float(lambda_now) / float(self.lmbda))
             fallback_base_scale = min(max(fallback_base_scale, 0.0), 1.0)
 
-        mixed_adv, mixed_weight, mixed_delta, mixed_flip, mixed_up_flip = (
-            self._shape_with_token_gap_wrong_boost(mixed_base_adv, g, completion_mask, lambda_now)
-        )
         mixed_mask = self._rollout_mask(seq_advantages).unsqueeze(1)
-        mixed_fallback_adv = mixed_base_adv.expand_as(g) * completion_mask
-        mixed_adv = torch.where(mixed_mask, mixed_adv, mixed_fallback_adv)
-        mixed_delta = torch.where(mixed_mask, mixed_delta, torch.zeros_like(mixed_delta))
-        mixed_flip = torch.where(mixed_mask, mixed_flip, torch.zeros_like(mixed_flip))
-        mixed_up_flip = torch.where(mixed_mask, mixed_up_flip, torch.zeros_like(mixed_up_flip))
+        if grpo_mixed_only_phase:
+            mixed_adv = mixed_base_adv.expand_as(g) * completion_mask
+            mixed_weight = torch.ones_like(g)
+            mixed_delta = torch.zeros_like(g)
+            mixed_flip = torch.zeros_like(g)
+            mixed_up_flip = torch.zeros_like(g)
+            mixed_adv = torch.where(mixed_mask, mixed_adv, torch.zeros_like(mixed_adv))
+        else:
+            mixed_adv, mixed_weight, mixed_delta, mixed_flip, mixed_up_flip = (
+                self._shape_with_token_gap_wrong_boost(mixed_base_adv, g, completion_mask, lambda_now)
+            )
+            mixed_fallback_adv = mixed_base_adv.expand_as(g) * completion_mask
+            mixed_adv = torch.where(mixed_mask, mixed_adv, mixed_fallback_adv)
+            mixed_delta = torch.where(mixed_mask, mixed_delta, torch.zeros_like(mixed_delta))
+            mixed_flip = torch.where(mixed_mask, mixed_flip, torch.zeros_like(mixed_flip))
+            mixed_up_flip = torch.where(mixed_mask, mixed_up_flip, torch.zeros_like(mixed_up_flip))
 
         all_correct_base_adv = (
             torch.full_like(g, float(self.all_correct_base_advantage) * fallback_base_scale)
@@ -155,18 +190,30 @@ class RLSDSignFlipWrongBoostStrictSplitTrainer(RLSDSignFlipStrictSplitTrainer):
             torch.full_like(g, float(self.all_wrong_base_advantage) * fallback_base_scale)
             * completion_mask
         )
-        all_correct_adv, correct_weight, correct_delta, correct_flip, correct_up_flip = (
-            self._shape_with_token_gap_wrong_boost(all_correct_base_adv, g, completion_mask, lambda_now)
-        )
-        all_wrong_adv, wrong_weight, wrong_delta, wrong_flip, wrong_up_flip = (
-            self._shape_with_token_gap_wrong_boost(all_wrong_base_adv, g, completion_mask, lambda_now)
-        )
+        if grpo_mixed_only_phase:
+            all_correct_adv = torch.zeros_like(g)
+            all_wrong_adv = torch.zeros_like(g)
+            correct_weight = torch.ones_like(g)
+            wrong_weight = torch.ones_like(g)
+            correct_delta = torch.zeros_like(g)
+            wrong_delta = torch.zeros_like(g)
+            correct_flip = torch.zeros_like(g)
+            wrong_flip = torch.zeros_like(g)
+            correct_up_flip = torch.zeros_like(g)
+            wrong_up_flip = torch.zeros_like(g)
+        else:
+            all_correct_adv, correct_weight, correct_delta, correct_flip, correct_up_flip = (
+                self._shape_with_token_gap_wrong_boost(all_correct_base_adv, g, completion_mask, lambda_now)
+            )
+            all_wrong_adv, wrong_weight, wrong_delta, wrong_flip, wrong_up_flip = (
+                self._shape_with_token_gap_wrong_boost(all_wrong_base_adv, g, completion_mask, lambda_now)
+            )
 
         token_adv = torch.zeros_like(g)
         effective_delta = torch.zeros_like(g)
         flip_active = torch.zeros_like(g)
         up_flip_active = torch.zeros_like(g)
-        if not self.strict_split_mixed_only:
+        if not mixed_only_now:
             token_adv = torch.where(all_correct, all_correct_adv, token_adv)
             token_adv = torch.where(all_wrong, all_wrong_adv, token_adv)
             effective_delta = torch.where(all_correct, correct_delta, effective_delta)
@@ -212,7 +259,7 @@ class RLSDSignFlipWrongBoostStrictSplitTrainer(RLSDSignFlipStrictSplitTrainer):
         reward_mean_all_correct = _masked_mean(rewards_binary, sample_all_correct)
         reward_mean_all_wrong = _masked_mean(rewards_binary, sample_all_wrong)
         reward_mean_mixed = _masked_mean(rewards_binary, sample_mixed)
-        if self.strict_split_mixed_only:
+        if mixed_only_now:
             no_feedback_group = all_correct_group | all_wrong_group
             feedback_group = mixed_group
         else:
@@ -222,7 +269,12 @@ class RLSDSignFlipWrongBoostStrictSplitTrainer(RLSDSignFlipStrictSplitTrainer):
         token_count = completion_mask.sum().clamp(min=1.0)
 
         self._log_metric("token_gap_lambda", lambda_now)
-        self._log_metric("mixed_only", float(self.strict_split_mixed_only))
+        self._log_metric("mixed_only", float(mixed_only_now))
+        self._log_metric("grpo_mixed_only_phase", float(grpo_mixed_only_phase))
+        self._log_metric(
+            "strict_split_grpo_mixed_only_after_decay",
+            float(self.strict_split_grpo_mixed_only_after_decay),
+        )
         self._log_metric("wrong_boost_flip", 1.0)
         self._log_metric("feedback_group_frac", float(feedback_group.float().mean().item()))
         self._log_metric("no_feedback_group_frac", float(no_feedback_group.float().mean().item()))
