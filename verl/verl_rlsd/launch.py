@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 import sys
 from typing import Any
@@ -78,58 +79,120 @@ def _patch_verl_vllm_async_server_on_disk() -> None:
 
 
 _FSDP_VLLM_ADD_LORA_OLD = "self.inference_engine.llm_engine.add_lora(lora_reqest)"
-_FSDP_VLLM_ADD_LORA_NEW = '''# RLSD_ASYNC_VLLM_ADD_LORA_PATCH
-                    import inspect as _rlsd_inspect
+_FSDP_VLLM_ADD_LORA_CALL = (
+    '__import__("verl_rlsd.launch", fromlist=["_rlsd_add_lora"]).'
+    '_rlsd_add_lora(self, lora_reqest)  # RLSD_ASYNC_VLLM_ADD_LORA_PATCH'
+)
 
-                    _rlsd_lora_target = getattr(self.inference_engine, "llm_engine", None)
-                    if _rlsd_lora_target is None:
-                        _rlsd_lora_target = self.inference_engine
-                    if not hasattr(_rlsd_lora_target, "add_lora") and hasattr(self, "model_runner"):
-                        _rlsd_model_runner = getattr(self, "model_runner", None)
-                        if hasattr(_rlsd_model_runner, "add_lora"):
-                            _rlsd_lora_target = _rlsd_model_runner
-                    if not hasattr(_rlsd_lora_target, "add_lora"):
-                        raise RuntimeError(
-                            "RLSD failed to find a vLLM add_lora API on "
-                            f"{type(_rlsd_lora_target).__name__}; this veRL/vLLM "
-                            "combination does not expose llm_engine.add_lora."
-                        )
-                    _rlsd_lora_result = _rlsd_lora_target.add_lora(lora_reqest)
-                    if _rlsd_inspect.isawaitable(_rlsd_lora_result):
-                        import asyncio as _rlsd_asyncio
 
-                        try:
-                            _rlsd_loop = _rlsd_asyncio.get_event_loop()
-                        except RuntimeError:
-                            _rlsd_loop = None
-                        if _rlsd_loop is None:
-                            _rlsd_asyncio.run(_rlsd_lora_result)
-                        elif _rlsd_loop.is_running():
-                            _rlsd_asyncio.run_coroutine_threadsafe(
-                                _rlsd_lora_result,
-                                _rlsd_loop,
-                            ).result()
-                        else:
-                            _rlsd_loop.run_until_complete(_rlsd_lora_result)'''
+def _rlsd_add_lora(sharding_manager: Any, lora_request: Any) -> None:
+    """Compatibility wrapper for veRL LoRA sync across vLLM v0/v1 objects."""
+    import asyncio
+    import inspect
+
+    inference_engine = getattr(sharding_manager, "inference_engine", None)
+    candidates = [
+        getattr(inference_engine, "llm_engine", None),
+        inference_engine,
+        getattr(inference_engine, "worker", None),
+        getattr(getattr(inference_engine, "worker", None), "model_runner", None),
+        getattr(sharding_manager, "model_runner", None),
+    ]
+    seen: set[int] = set()
+    for candidate in candidates:
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        add_lora = getattr(candidate, "add_lora", None)
+        if add_lora is None:
+            continue
+        result = add_lora(lora_request)
+        if inspect.isawaitable(result):
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = None
+            if loop is None:
+                asyncio.run(result)
+            elif loop.is_running():
+                asyncio.run_coroutine_threadsafe(result, loop).result()
+            else:
+                loop.run_until_complete(result)
+        return
+    raise AttributeError(
+        "RLSD failed to find a vLLM add_lora API; this veRL/vLLM combination "
+        "does not expose llm_engine.add_lora or an equivalent add_lora method."
+    )
+
+
+def _find_module_file(module_name: str, relative_path: str) -> str | None:
+    try:
+        spec = importlib.util.find_spec(module_name)
+        path = getattr(spec, "origin", None) if spec is not None else None
+        if path and os.path.isfile(path):
+            return path
+    except Exception:
+        pass
+    for base in sys.path:
+        if not base:
+            continue
+        path = os.path.join(base, relative_path)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _repair_bad_add_lora_patch(text: str) -> tuple[str, bool]:
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    changed = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if "RLSD_ASYNC_VLLM_ADD_LORA_PATCH" in line and "_rlsd_add_lora" not in line:
+            start = i
+            end = None
+            limit = min(len(lines), i + 80)
+            j = i + 1
+            while j < limit:
+                if "_rlsd_loop.run_until_complete(_rlsd_lora_result)" in lines[j]:
+                    end = j + 1
+                    break
+                j += 1
+            if end is None:
+                out.append(line)
+                i = start + 1
+                continue
+            indent = line[: len(line) - len(line.lstrip())]
+            newline = "\n" if line.endswith("\n") else ""
+            out.append(f"{indent}{_FSDP_VLLM_ADD_LORA_CALL}{newline}")
+            changed = True
+            i = end
+            continue
+        out.append(line)
+        i += 1
+    return "".join(out), changed
 
 
 def _patch_fsdp_vllm_add_lora_on_disk() -> None:
     """Patch old veRL FSDP-vLLM sharding to support vLLM v1 LoRA sync."""
-    try:
-        mod = importlib.import_module("verl.workers.sharding_manager.fsdp_vllm")
-    except Exception:
-        return
-    path = getattr(mod, "__file__", None)
-    if not path or not os.path.isfile(path):
+    path = _find_module_file(
+        "verl.workers.sharding_manager.fsdp_vllm",
+        os.path.join("verl", "workers", "sharding_manager", "fsdp_vllm.py"),
+    )
+    if not path:
         return
     with open(path, encoding="utf-8") as f:
         text = f.read()
-    if "RLSD_ASYNC_VLLM_ADD_LORA_PATCH" in text:
+    text, repaired = _repair_bad_add_lora_patch(text)
+    if not repaired and "RLSD_ASYNC_VLLM_ADD_LORA_PATCH" in text:
         return
-    if _FSDP_VLLM_ADD_LORA_OLD not in text:
+    if not repaired and _FSDP_VLLM_ADD_LORA_OLD not in text:
         return
+    if not repaired:
+        text = text.replace(_FSDP_VLLM_ADD_LORA_OLD, _FSDP_VLLM_ADD_LORA_CALL, 1)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(text.replace(_FSDP_VLLM_ADD_LORA_OLD, _FSDP_VLLM_ADD_LORA_NEW, 1))
+        f.write(text)
 
 
 def _patch_ray_init_for_vllm() -> None:

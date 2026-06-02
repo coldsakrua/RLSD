@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import functools
 import json
 import logging
 import os
@@ -17,6 +18,13 @@ logger = logging.getLogger(__name__)
 _CONTROLLER: TeacherEMAController | None = None
 _TRAINER_REF: weakref.ReferenceType[Any] | None = None
 _PATCHED = False
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _cfg_get(config: Any, path: str, default: Any = None) -> Any:
@@ -82,6 +90,8 @@ class TeacherEMAController:
         config = trainer.config
         enabled = bool(_cfg_get(config, "algorithm.rlsd.teacher_ema_enabled", False))
         if not enabled:
+            return None
+        if _env_truthy("RLSD_INTERNAL_TEACHER_LOGPROB", False):
             return None
         output_dir = Path(str(_cfg_get(config, "trainer.default_local_dir", ".")))
         adapter_dir = output_dir / str(
@@ -309,6 +319,235 @@ def _patch_actor_worker_export() -> None:
         return
 
 
+def _get_item(container: Any, key: str) -> Any:
+    try:
+        return container[key]
+    except Exception:
+        pass
+    try:
+        return container.get(key)
+    except Exception:
+        return None
+
+
+def _set_item(container: Any, key: str, value: Any) -> None:
+    try:
+        container[key] = value
+        return
+    except Exception:
+        pass
+    batch = getattr(container, "batch", None)
+    if batch is not None:
+        batch[key] = value
+
+
+def _candidate_model_roots(worker: Any) -> list[Any]:
+    roots: list[Any] = []
+    actor = getattr(worker, "actor", None)
+    engine = getattr(actor, "engine", None)
+    for obj in (worker, actor, engine):
+        if obj is not None:
+            roots.append(obj)
+    attr_names = (
+        "actor_module_fsdp",
+        "actor_module",
+        "fsdp_module",
+        "model_module",
+        "model",
+        "module",
+        "_model",
+    )
+    for obj in list(roots):
+        for name in attr_names:
+            candidate = getattr(obj, name, None)
+            if candidate is not None:
+                roots.append(candidate)
+    deduped: list[Any] = []
+    seen: set[int] = set()
+    for root in roots:
+        ident = id(root)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        deduped.append(root)
+    return deduped
+
+
+def _iter_lora_params(module: Any) -> list[tuple[str, torch.nn.Parameter]]:
+    try:
+        named_parameters = module.named_parameters
+    except AttributeError:
+        return []
+    teacher_adapter = os.environ.get("RLSD_TEACHER_EMA_LORA_NAME", "teacher_ema")
+    params: list[tuple[str, torch.nn.Parameter]] = []
+    try:
+        iterator = named_parameters()
+    except Exception:
+        return []
+    for name, param in iterator:
+        lname = str(name).lower()
+        if "lora_" not in lname:
+            continue
+        if teacher_adapter and f".{teacher_adapter.lower()}." in lname:
+            continue
+        if not isinstance(param, torch.nn.Parameter):
+            continue
+        params.append((str(name), param))
+    return params
+
+
+def _find_lora_module(worker: Any) -> tuple[Any | None, list[tuple[str, torch.nn.Parameter]]]:
+    for root in _candidate_model_roots(worker):
+        params = _iter_lora_params(root)
+        if params:
+            return root, params
+    return None, []
+
+
+def _teacher_ema_decay() -> float:
+    raw = os.environ.get("RLSD_TEACHER_EMA_DECAY", "0.995")
+    try:
+        decay = float(raw)
+    except ValueError:
+        decay = 0.995
+    return min(max(decay, 0.0), 1.0)
+
+
+def _ensure_internal_ema_state(worker: Any, params: list[tuple[str, torch.nn.Parameter]]) -> dict[str, torch.Tensor]:
+    state = getattr(worker, "_rlsd_internal_teacher_ema_state", None)
+    if not isinstance(state, dict) or not state:
+        state = {name: param.detach().clone() for name, param in params}
+        setattr(worker, "_rlsd_internal_teacher_ema_state", state)
+    return state
+
+
+def _update_internal_teacher_ema(worker: Any) -> bool:
+    if not _env_truthy("RLSD_INTERNAL_TEACHER_LOGPROB", False):
+        return False
+    _, params = _find_lora_module(worker)
+    if not params:
+        if not getattr(worker, "_rlsd_internal_teacher_warned", False):
+            logger.warning("Internal EMA teacher is enabled but no LoRA parameters were found on actor worker.")
+            setattr(worker, "_rlsd_internal_teacher_warned", True)
+        return False
+    state = _ensure_internal_ema_state(worker, params)
+    decay = _teacher_ema_decay()
+    with torch.no_grad():
+        for name, param in params:
+            current = param.detach()
+            previous = state.get(name)
+            if previous is None or tuple(previous.shape) != tuple(current.shape):
+                state[name] = current.clone()
+                continue
+            if previous.device != current.device or previous.dtype != current.dtype:
+                previous = previous.to(device=current.device, dtype=current.dtype)
+            previous.mul_(decay).add_(current, alpha=1.0 - decay)
+            state[name] = previous
+    return True
+
+
+def _teacher_tensor_from_output(output: Any) -> torch.Tensor | None:
+    for key in ("old_log_probs", "old_log_prob", "log_probs", "log_prob"):
+        value = _get_item(output, key)
+        if isinstance(value, torch.Tensor):
+            return value.detach()
+    return None
+
+
+def _compute_internal_teacher_logprobs(worker: Any, data: Any, compute_fn: Any = None) -> torch.Tensor | None:
+    _, params = _find_lora_module(worker)
+    if not params:
+        return None
+    state = _ensure_internal_ema_state(worker, params)
+    teacher_values: list[tuple[torch.nn.Parameter, torch.Tensor]] = []
+    for name, param in params:
+        teacher_value = state.get(name)
+        if teacher_value is None or tuple(teacher_value.shape) != tuple(param.shape):
+            return None
+        teacher_values.append((param, teacher_value))
+    backups: list[tuple[torch.nn.Parameter, torch.Tensor]] = []
+    with torch.no_grad():
+        for param, teacher_value in teacher_values:
+            backups.append((param, param.detach().clone()))
+            param.copy_(teacher_value.to(device=param.device, dtype=param.dtype))
+        try:
+            actor = getattr(worker, "actor", None)
+            infer_batch = getattr(actor, "infer_batch", None)
+            if callable(infer_batch):
+                teacher_output = infer_batch(data)
+            elif compute_fn is not None:
+                teacher_output = compute_fn(worker, data)
+            else:
+                return None
+        finally:
+            for param, backup in backups:
+                param.copy_(backup)
+    tensor = _teacher_tensor_from_output(teacher_output)
+    if tensor is None:
+        return None
+    try:
+        return tensor.cpu()
+    except Exception:
+        return tensor
+
+
+def _patch_actor_worker_internal_teacher() -> None:
+    module_names = (
+        "verl.workers.engine_workers",
+        "verl.workers.fsdp_workers",
+        "verl.workers.megatron_workers",
+        "verl.workers.roles.actor_rollout_ref",
+    )
+    class_names = ("ActorRolloutRefWorker", "ActorWorker", "FSDPWorker")
+    for module_name in module_names:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        for class_name in class_names:
+            worker_cls = getattr(module, class_name, None)
+            if worker_cls is None or getattr(worker_cls, "_rlsd_internal_teacher_patched", False):
+                continue
+            original_compute = getattr(worker_cls, "compute_log_prob", None)
+            if original_compute is None:
+                continue
+
+            @functools.wraps(original_compute)
+            def compute_log_prob(self, data, _original_compute=original_compute):  # type: ignore[no-untyped-def]
+                output = _original_compute(self, data)
+                if _env_truthy("RLSD_INTERNAL_TEACHER_LOGPROB", False):
+                    teacher_logprobs = _compute_internal_teacher_logprobs(self, data, _original_compute)
+                    if teacher_logprobs is None:
+                        message = "Internal EMA teacher logprobs were requested but could not be computed."
+                        if _env_truthy("RLSD_INTERNAL_TEACHER_STRICT", True):
+                            raise RuntimeError(message)
+                        logger.warning(message)
+                    else:
+                        _set_item(output, "teacher_logprobs", teacher_logprobs)
+                return output
+
+            worker_cls.compute_log_prob = compute_log_prob
+
+            original_update = getattr(worker_cls, "update_actor", None)
+            if original_update is not None:
+
+                @functools.wraps(original_update)
+                def update_actor(self, data, _original_update=original_update):  # type: ignore[no-untyped-def]
+                    result = _original_update(self, data)
+                    try:
+                        _update_internal_teacher_ema(self)
+                    except Exception as exc:
+                        if _env_truthy("RLSD_INTERNAL_TEACHER_STRICT", True):
+                            raise
+                        logger.warning("Internal EMA teacher update failed: %s", exc)
+                    return result
+
+                worker_cls.update_actor = update_actor
+
+            worker_cls._rlsd_internal_teacher_patched = True
+            logger.info("Patched %s.%s for internal EMA teacher logprobs.", module_name, class_name)
+
+
 def _patch_checkpoint_engine_update_weights() -> None:
     try:
         checkpoint_mod = importlib.import_module("verl.checkpoint_engine.base")
@@ -445,6 +684,7 @@ def patch_teacher_ema() -> None:
     if _PATCHED:
         return
     _patch_actor_worker_export()
+    _patch_actor_worker_internal_teacher()
     _patch_teacher_model_manager_lora()
     _patch_ray_trainer_init()
     _patch_checkpoint_engine_update_weights()

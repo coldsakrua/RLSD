@@ -49,10 +49,19 @@ MAX_STEPS=300 \
 sbatch verl/rlsd_4b.sh
 ```
 
-The default resource split is one actor/rollout GPU plus one teacher GPU:
+Most teacher-distillation scripts default to one actor/rollout GPU plus one
+teacher GPU:
 
 ```bash
 ACTOR_GPUS_PER_NODE=1 TEACHER_GPUS_PER_NODE=1 sbatch verl/rlsd_4b.sh
+```
+
+`cast_ema_4b.sh` is the exception: its EMA teacher is computed inside the
+actor worker, so both GPUs default to the main actor/rollout pool and no
+separate teacher GPU is reserved:
+
+```bash
+ACTOR_GPUS_PER_NODE=2 DISTILLATION_ENABLED=false sbatch verl/cast_ema_4b.sh
 ```
 
 Batch defaults:
