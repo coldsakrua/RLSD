@@ -99,6 +99,7 @@ def _rlsd_add_lora(sharding_manager: Any, lora_request: Any) -> None:
         getattr(sharding_manager, "model_runner", None),
     ]
     seen: set[int] = set()
+    last_error: Exception | None = None
     for candidate in candidates:
         if candidate is None or id(candidate) in seen:
             continue
@@ -106,7 +107,13 @@ def _rlsd_add_lora(sharding_manager: Any, lora_request: Any) -> None:
         add_lora = getattr(candidate, "add_lora", None)
         if add_lora is None:
             continue
-        result = add_lora(lora_request)
+        try:
+            result = add_lora(lora_request)
+        except AttributeError as exc:
+            if "lora_manager" in str(exc):
+                last_error = exc
+                continue
+            raise
         if inspect.isawaitable(result):
             try:
                 loop = asyncio.get_event_loop()
@@ -119,6 +126,12 @@ def _rlsd_add_lora(sharding_manager: Any, lora_request: Any) -> None:
             else:
                 loop.run_until_complete(result)
         return
+    if last_error is not None:
+        raise AttributeError(
+            "vLLM exposes add_lora but was started without a LoRA manager. "
+            "Enable actor_rollout_ref.rollout.engine_kwargs.vllm.enable_lora=true "
+            "and set max_loras/max_lora_rank for LoRA rollout sync."
+        ) from last_error
     raise AttributeError(
         "RLSD failed to find a vLLM add_lora API; this veRL/vLLM combination "
         "does not expose llm_engine.add_lora or an equivalent add_lora method."
