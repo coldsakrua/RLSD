@@ -299,6 +299,14 @@ def _strict_split_common(
         fallback_scale = min(max(abs(lam / token_gap_lambda), 0.0), 1.0)
 
     g = _teacher_student_gap(response_mask, kwargs)
+    ratio_deadband_low = float(_cfg_get(config, "algorithm.rlsd.token_ratio_deadband_low", 1.0) or 1.0)
+    ratio_deadband_high = float(_cfg_get(config, "algorithm.rlsd.token_ratio_deadband_high", 1.0) or 1.0)
+    if ratio_deadband_low > 0.0 and ratio_deadband_high > ratio_deadband_low:
+        teacher_student_ratio = _safe_exp_gap(g)
+        active_gap = (teacher_student_ratio < ratio_deadband_low) | (
+            teacher_student_ratio > ratio_deadband_high
+        )
+        g = torch.where(active_gap, g, torch.zeros_like(g))
     correct_low = float(_cfg_get(config, "algorithm.rlsd.correct_weight_clip_low", 0.8))
     correct_high = float(_cfg_get(config, "algorithm.rlsd.correct_weight_clip_high", 1.05))
     wrong_low = float(_cfg_get(config, "algorithm.rlsd.wrong_weight_clip_low", 0.95))
@@ -356,6 +364,24 @@ def _strict_split_common(
     token_adv = torch.where(all_correct, shape(all_correct_base), token_adv)
     token_adv = torch.where(all_wrong, shape(all_wrong_base), token_adv)
     token_adv = torch.where(mixed, shape(mixed_base), token_adv)
+
+    positive_adv_length_cap = int(_cfg_get(config, "algorithm.rlsd.positive_adv_length_cap", 0) or 0)
+    if positive_adv_length_cap > 0:
+        response_pos = torch.cumsum(mask, dim=-1)
+        past_cap = (response_pos > float(positive_adv_length_cap)) & mask.bool()
+        token_adv = torch.where(
+            past_cap & (token_adv > 0),
+            torch.zeros_like(token_adv),
+            token_adv,
+        )
+
+    length_penalty_start = int(_cfg_get(config, "algorithm.rlsd.length_penalty_start", 0) or 0)
+    length_penalty = max(0.0, float(_cfg_get(config, "algorithm.rlsd.length_penalty", 0.0) or 0.0))
+    if length_penalty_start > 0 and length_penalty > 0.0:
+        response_pos = torch.cumsum(mask, dim=-1)
+        past_penalty_start = (response_pos > float(length_penalty_start)) & mask.bool()
+        token_adv = token_adv - length_penalty * past_penalty_start.float()
+
     token_adv = torch.clamp(token_adv, min=adv_low, max=adv_high) * mask
     return token_adv, token_adv
 

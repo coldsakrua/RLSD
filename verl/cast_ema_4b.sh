@@ -10,20 +10,23 @@
 
 set -eo pipefail
 
-# Strict-split sign-flip RLSD plus wrong-path positive boost.
+# Strict-split sign-flip RLSD plus wrong-path positive boost with an EMA teacher.
 # Teacher uses the exact same prompt tokens as the student, while teacher
 # weights follow an EMA of student LoRA so token gaps stay non-zero.
-RUN_CONFIG="${RUN_CONFIG:-cast_ema_4b}"
+#
+# Defaults are length-safe: keep wrong-path positive flips for credit assignment,
+# but stop long-tail continuation tokens from receiving positive advantage.
+RUN_CONFIG="${RUN_CONFIG:-cast_ema_len_safe_4b}"
 ADV_ESTIMATOR="${ADV_ESTIMATOR:-rlsd_strict_split_flip_wrong_boost}"
 REWARD_FUNCTION_NAME="${REWARD_FUNCTION_NAME:-compute_score}"
-TOKEN_GAP_LAMBDA="${TOKEN_GAP_LAMBDA:-1.0}"
-TOKEN_GAP_DECAY_STEPS="${TOKEN_GAP_DECAY_STEPS:-0}"
+TOKEN_GAP_LAMBDA="${TOKEN_GAP_LAMBDA:-0.5}"
+TOKEN_GAP_DECAY_STEPS="${TOKEN_GAP_DECAY_STEPS:-300}"
 TEACHER_PROMPT_MODE="${TEACHER_PROMPT_MODE:-identical_student}"
 OFFICIAL_TEACHER_PROMPT="${OFFICIAL_TEACHER_PROMPT:-false}"
 DISTILLATION_LOSS_COEF="${DISTILLATION_LOSS_COEF:-0.0}"
 
 TEACHER_EMA_ENABLED="${TEACHER_EMA_ENABLED:-true}"
-TEACHER_EMA_DECAY="${TEACHER_EMA_DECAY:-0.99}"
+TEACHER_EMA_DECAY="${TEACHER_EMA_DECAY:-0.995}"
 TEACHER_EMA_UPDATE_INTERVAL_STEPS="${TEACHER_EMA_UPDATE_INTERVAL_STEPS:-1}"
 TEACHER_EMA_LORA_NAME="${TEACHER_EMA_LORA_NAME:-teacher_ema}"
 
@@ -48,7 +51,7 @@ TEMPERATURE="${TEMPERATURE:-0.7}"
 TOP_P="${TOP_P:-0.95}"
 TOP_K="${TOP_K:-20}"
 MIN_P="${MIN_P:-0.0}"
-PRESENCE_PENALTY="${PRESENCE_PENALTY:-0.2}"
+PRESENCE_PENALTY="${PRESENCE_PENALTY:-0.0}"
 
 # 4 prompts * 8 rollouts = 32 responses. Keep mini/micro small for 3072-token rollouts.
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
@@ -105,7 +108,7 @@ SAVE_STEPS="${SAVE_STEPS:-50}"
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-3072}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 MAX_LENGTH="$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))"
-MAX_TEACHER_PROMPT_LENGTH="${MAX_TEACHER_PROMPT_LENGTH:-${MAX_PROMPT_LENGTH}}"
+MAX_TEACHER_PROMPT_LENGTH="${MAX_TEACHER_PROMPT_LENGTH:-512}"
 
 if [ "${WARMUP_STEPS}" != "0" ]; then
     LR_WARMUP_STEPS="${WARMUP_STEPS}"
@@ -132,6 +135,11 @@ LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj,gate_pr
 DAPO_EPSILON="${DAPO_EPSILON:-0.2}"
 DAPO_EPSILON_HIGH="${DAPO_EPSILON_HIGH:-0.28}"
 KL_LOSS_COEF="${KL_LOSS_COEF:-0.0}"
+POSITIVE_ADV_LENGTH_CAP="${POSITIVE_ADV_LENGTH_CAP:-2048}"
+LENGTH_PENALTY_START="${LENGTH_PENALTY_START:-0}"
+LENGTH_PENALTY="${LENGTH_PENALTY:-0.0}"
+TOKEN_RATIO_DEADBAND_LOW="${TOKEN_RATIO_DEADBAND_LOW:-0.95}"
+TOKEN_RATIO_DEADBAND_HIGH="${TOKEN_RATIO_DEADBAND_HIGH:-1.05}"
 DISTILLATION_TOPK="${DISTILLATION_TOPK:-32}"
 DISTILLATION_USE_TASK_REWARDS="${DISTILLATION_USE_TASK_REWARDS:-true}"
 USE_POLICY_GRAD_DISTILL="${USE_POLICY_GRAD_DISTILL:-false}"
@@ -172,6 +180,11 @@ VERL_ARGS=(
     "++algorithm.rlsd.teacher_ema_lora_name=${TEACHER_EMA_LORA_NAME}"
     "++algorithm.rlsd.teacher_ema_adapter_dir=teacher_ema_adapter"
     "++algorithm.rlsd.wrong_boost=true"
+    "++algorithm.rlsd.positive_adv_length_cap=${POSITIVE_ADV_LENGTH_CAP}"
+    "++algorithm.rlsd.length_penalty_start=${LENGTH_PENALTY_START}"
+    "++algorithm.rlsd.length_penalty=${LENGTH_PENALTY}"
+    "++algorithm.rlsd.token_ratio_deadband_low=${TOKEN_RATIO_DEADBAND_LOW}"
+    "++algorithm.rlsd.token_ratio_deadband_high=${TOKEN_RATIO_DEADBAND_HIGH}"
     "++algorithm.rlsd.all_correct_base_advantage=${ALL_CORRECT_BASE_ADVANTAGE}"
     "++algorithm.rlsd.all_wrong_base_advantage=${ALL_WRONG_BASE_ADVANTAGE}"
     "++algorithm.rlsd.correct_weight_clip_low=${CORRECT_WEIGHT_CLIP_LOW}"
