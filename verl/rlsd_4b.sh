@@ -61,7 +61,9 @@ export PYTHONPATH="${SCRIPT_DIR}:${BASE_DIR}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+if [[ "${PYTORCH_CUDA_ALLOC_CONF:-}" == *"expandable_segments:True"* ]]; then
+    unset PYTORCH_CUDA_ALLOC_CONF
+fi
 # Ray AF_UNIX sockets must stay under 107 bytes; avoid long GPFS paths.
 _RAY_JOB_TAG="${SLURM_JOB_ID:-$$}"
 export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/ray_${_RAY_JOB_TAG}}"
