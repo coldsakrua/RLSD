@@ -717,6 +717,29 @@ def extract_mcq_answer(text: str) -> Optional[str]:
     return None
 
 
+def _completion_token_count(
+    text: str,
+    token_ids: Optional[List[int]],
+    tokenizer: Any,
+) -> int:
+    """Return completion length in tokens (prefer vLLM token_ids over re-tokenizing text)."""
+    if token_ids:
+        return len(token_ids)
+    if not text:
+        return 0
+    return len(tokenizer.encode(text, add_special_tokens=False))
+
+
+def _avg_output_tokens(rows: List[Dict[str, Any]]) -> float:
+    counts: List[int] = []
+    for r in rows:
+        for g in r.get("generations", []):
+            n = g.get("num_tokens")
+            if n is not None:
+                counts.append(int(n))
+    return sum(counts) / len(counts) if counts else 0.0
+
+
 def summarize_result_subset(
     rows: List[Dict[str, Any]],
     pass_at_k_list: List[int],
@@ -745,6 +768,7 @@ def summarize_result_subset(
         "majority_vote_pct": 100.0 * maj / n_d if n_d else 0.0,
         "average_correct_pct": 100.0 * tot_correct / total_sol if total_sol else 0.0,
         "format_rate_pct": 100.0 * fmt / total_sol if total_sol else 0.0,
+        "avg_output_tokens_mean": _avg_output_tokens(rows),
     }
 
 
@@ -1145,6 +1169,7 @@ def main() -> None:
     formatted_total = 0
     total_solutions = 0
     total_correct = 0
+    total_output_tokens = 0
     majority_correct = 0
     processed = 0
 
@@ -1178,10 +1203,14 @@ def main() -> None:
             preds: List[str] = []
             correct_flags: List[bool] = []
             formatted_flags: List[bool] = []
+            token_counts: List[int] = []
 
             for o in output.outputs:
                 gen = o.text
+                n_tokens = _completion_token_count(gen, getattr(o, "token_ids", None), tokenizer)
                 generations.append(gen)
+                token_counts.append(n_tokens)
+                total_output_tokens += n_tokens
                 eval_type = str(ex.get("eval_type", "boxed_math"))
                 if eval_type == "mcq":
                     pred = extract_mcq_answer(gen)
@@ -1233,11 +1262,15 @@ def main() -> None:
                         {
                             "predicted_answer": p,
                             "full_generation": g,
+                            "num_tokens": n,
                             "correct": c,
                             "formatted": f,
                         }
-                        for p, g, c, f in zip(preds, generations, correct_flags, formatted_flags)
+                        for p, g, n, c, f in zip(
+                            preds, generations, token_counts, correct_flags, formatted_flags
+                        )
                     ],
+                    "avg_output_tokens": sum(token_counts) / len(token_counts) if token_counts else 0.0,
                     "num_correct": sum(correct_flags),
                     "pass_at_gen_n": bool(any(correct_flags)),
                     "majority_vote_correct": maj_ok,
@@ -1313,6 +1346,7 @@ def main() -> None:
             "average_correct_pct": 100.0 * total_correct / total_solutions if total_solutions else 0.0,
             "majority_vote_pct": 100.0 * majority_correct / processed if processed else 0.0,
             "format_rate_pct": 100.0 * formatted_total / total_solutions if total_solutions else 0.0,
+            "avg_output_tokens_mean": total_output_tokens / total_solutions if total_solutions else 0.0,
             "math_verify": _HAS_MATH_VERIFY,
             "generate_batch_size": gbs if args.generate_batch_size > 0 else n_prompts,
             "generate_batch_size_requested": args.generate_batch_size,
@@ -1349,6 +1383,7 @@ def main() -> None:
         print(f"  Pass@{k}: {s['pct']:.2f}% ({s['count']}/{n})", flush=True)
     print(f"  Avg1(one-shot hit rate): {summary['avg1_pct']:.2f}%", flush=True)
     print(f"  Avg16(overall correctness): {summary['avg16_pct']:.2f}%", flush=True)
+    print(f"  Avg output tokens: {summary['avg_output_tokens_mean']:.1f}", flush=True)
     for tag, m in metrics_by_dataset.items():
         print(f"[{tag}] n={m['num_problems']}", flush=True)
         for k in pass_at_k_list:
@@ -1356,6 +1391,7 @@ def main() -> None:
             print(f"  Pass@{k}: {s['pct']:.2f}% ({s['count']}/{m['num_problems']})", flush=True)
         print(f"  Avg1(one-shot hit rate): {m['avg1_pct']:.2f}%", flush=True)
         print(f"  Avg16(overall correctness): {m['avg16_pct']:.2f}%", flush=True)
+        print(f"  Avg output tokens: {m['avg_output_tokens_mean']:.1f}", flush=True)
     print("[BY_CATEGORY]", flush=True)
     for cat, m in metrics_by_category.items():
         print(f"[{cat}] n={m['num_problems']}", flush=True)
@@ -1364,9 +1400,11 @@ def main() -> None:
             print(f"  Pass@{k}: {s['pct']:.2f}% ({s['count']}/{m['num_problems']})", flush=True)
         print(f"  Avg1(one-shot hit rate): {m['avg1_pct']:.2f}%", flush=True)
         print(f"  Avg16(overall correctness): {m['avg16_pct']:.2f}%", flush=True)
+        print(f"  Avg output tokens: {m['avg_output_tokens_mean']:.1f}", flush=True)
     print(f"Avg correct / sample: {summary['average_correct_pct']:.2f}%", flush=True)
     print(f"Majority vote: {summary['majority_vote_pct']:.2f}%", flush=True)
     print(f"Boxed format rate: {summary['format_rate_pct']:.2f}%", flush=True)
+    print(f"Avg output tokens: {summary['avg_output_tokens_mean']:.1f}", flush=True)
     print(f"Wrote {out_path}", flush=True)
     print("=" * 60, flush=True)
 

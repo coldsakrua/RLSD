@@ -1,0 +1,74 @@
+# veRL RLSD/OPSD/RLRT launchers
+
+This folder contains server-side veRL launch code for the 4B experiments
+that exist at the repository root.
+
+## Files
+
+- `verl_rlsd/reward.py`: math reward adapter for veRL custom rewards.
+- `verl_rlsd/advantage.py`: custom advantage estimators:
+  - `rlsd_grpo`: paper RLSD/OPSD token-gap shaping on GRPO advantages.
+  - `rlsd_strict_split_flip`: strict split fallback plus correct-path sign flip.
+  - `rlsd_strict_split_flip_wrong_boost`: strict split plus wrong-path positive flip.
+  - `rlrt`: RLRT reversed teacher weighting on correct rollouts.
+  - `opd_zero`: zero policy-gradient reward for distillation-only OPSD.
+- `verl_rlsd/teacher_agent.py`: custom veRL agent loop manager that aligns teacher
+  response logprobs under reference-solution, no-reference, identical-student,
+  official-OPSD, or successful-rollout teacher prompts.
+- `verl_rlsd/teacher_ema.py`: EMA teacher LoRA sync for `cast_ema_4b.sh`.
+- `*_4b*.sh`: one fully self-contained sbatch script per experiment.
+
+## Script mapping
+
+| Root script | veRL script | Main behavior |
+| --- | --- | --- |
+| `opsd_4b_only.sh` | `verl/grpo_opds_4b.sh` | Pure OPSD-style token-gap shaping with reward, lambda 0.2, decay 50. |
+| `opsd_4b.sh` | `verl/opsd_4b.sh` | Official OPSD-style distillation-only run, n=1, official teacher prompt. |
+| `grpo_4b_strict.sh` | `verl/grpo_4b.sh` | Strict GRPO baseline, no teacher shaping or distillation. |
+| `rlrt_4b.sh` | `verl/rlrt_4b.sh` | RLRT reversed teacher weighting, lambda 0.5, no decay, successful-rollout teacher context. |
+| `rlsd_4b_paper.sh` | `verl/rlsd_4b.sh` | Canonical RLSD paper token shaping, lambda 0.5, decay 50. |
+| `rlsd_4b_strict_split_flip_nodecay_no_teacher_ref.sh` | `verl/cast_nowrongboost_4b.sh` | Strict split sign flip, lambda 1.0, no decay, no reference solution in teacher prompt. |
+| `rlsd_4b_strict_split_flip_wrong_boost_nodecay_teacher_ref.sh` | `verl/cast_4b.sh` | Strict split sign flip plus wrong-path positive boost, lambda 1.0, teacher sees reference solution. |
+| — | `verl/cast_ema_4b.sh` | Same as `cast_4b.sh` but identical student prompt and EMA teacher LoRA. |
+
+## Submit on the server
+
+From the repository root:
+
+```bash
+sbatch verl/rlsd_4b.sh
+```
+
+Useful overrides:
+
+```bash
+BASE_DIR=/gpfs/share/home/2501210611/RLSD \
+MODEL_PATH=/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b \
+DATASET_PATH=/gpfs/share/home/2501210611/RLSD/data/dapo/dapo-math-17k.parquet \
+MAX_STEPS=300 \
+sbatch verl/rlsd_4b.sh
+```
+
+The default resource split is one actor/rollout GPU plus one teacher GPU:
+
+```bash
+ACTOR_GPUS_PER_NODE=1 TEACHER_GPUS_PER_NODE=1 sbatch verl/rlsd_4b.sh
+```
+
+Batch defaults:
+
+- GRPO/RLSD/RLRT/OPSD-only scripts use `TRAIN_BATCH_SIZE=4` prompts and
+  `NUM_GENERATIONS=8`, i.e. 32 generated responses per veRL train batch.
+- Official OPSD uses `TRAIN_BATCH_SIZE=8` and `NUM_GENERATIONS=1`.
+- All scripts default to `PPO_MINI_BATCH_SIZE=4` and
+  `PPO_MICRO_BATCH_SIZE_PER_GPU=2` for safer memory use with 3072-token
+  responses on a 2-GPU A800 node.
+
+Append raw veRL/Hydra overrides with `VERL_EXTRA_ARGS`, for example:
+
+```bash
+VERL_EXTRA_ARGS="trainer.resume_mode=auto actor_rollout_ref.rollout.gpu_memory_utilization=0.85" \
+sbatch verl/rlsd_4b.sh
+```
+
+W&B defaults to offline mode. Sync later from the output directory if needed.
