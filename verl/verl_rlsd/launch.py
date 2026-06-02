@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from . import advantage as custom_advantage
+from .rollout_metrics import patch_rollout_length_logging
 from .teacher_ema import patch_teacher_ema
 
 
@@ -76,55 +77,44 @@ def _patch_verl_vllm_async_server_on_disk() -> None:
         f.write(text.replace(_RAY_INIT_OLD, _RAY_INIT_NEW, 1))
 
 
-_FSDP_VLLM_LORA_BLOCK_OLD = '''                if hasattr(peft_model, "peft_config"):
-                    peft_config = peft_model.peft_config.get("default", None)
-                    params = __collect_lora_params()
-                else:
-                    params = self.module.state_dict()
-'''
+_FSDP_VLLM_ADD_LORA_OLD = "self.inference_engine.llm_engine.add_lora(lora_reqest)"
+_FSDP_VLLM_ADD_LORA_NEW = '''# RLSD_ASYNC_VLLM_ADD_LORA_PATCH
+                    import inspect as _rlsd_inspect
 
-_FSDP_VLLM_LORA_BLOCK_NEW = '''                if hasattr(peft_model, "peft_config"):
-                    peft_config = peft_model.peft_config.get("default", None)
-                    if os.environ.get("RLSD_MERGE_LORA_FOR_ASYNC_VLLM", "").lower() in {"1", "true", "yes"}:
-                        from peft.tuners.lora import LoraLayer
+                    _rlsd_lora_target = getattr(self.inference_engine, "llm_engine", None)
+                    if _rlsd_lora_target is None:
+                        _rlsd_lora_target = self.inference_engine
+                    if not hasattr(_rlsd_lora_target, "add_lora") and hasattr(self, "model_runner"):
+                        _rlsd_model_runner = getattr(self, "model_runner", None)
+                        if hasattr(_rlsd_model_runner, "add_lora"):
+                            _rlsd_lora_target = _rlsd_model_runner
+                    if not hasattr(_rlsd_lora_target, "add_lora"):
+                        raise RuntimeError(
+                            "RLSD failed to find a vLLM add_lora API on "
+                            f"{type(_rlsd_lora_target).__name__}; this veRL/vLLM "
+                            "combination does not expose llm_engine.add_lora."
+                        )
+                    _rlsd_lora_result = _rlsd_lora_target.add_lora(lora_reqest)
+                    if _rlsd_inspect.isawaitable(_rlsd_lora_result):
+                        import asyncio as _rlsd_asyncio
 
-                        def _merge_or_unmerge_lora(do_merge):
-                            for _module in peft_model.modules():
-                                if isinstance(_module, LoraLayer):
-                                    if do_merge and not getattr(_module, "merged", False):
-                                        _module.merge()
-                                    elif not do_merge and getattr(_module, "merged", False):
-                                        _module.unmerge()
-
-                        params = OrderedDict()
-                        with FSDP.summon_full_params(self.module, writeback=False):
-                            _merge_or_unmerge_lora(True)
-                            try:
-                                model = peft_model.base_model.model
-                                orig_dev = "cpu" if "cpu" in str(next(model.parameters()).device) else get_device_name()
-                                model = model.to("cpu")
-                                for name, param in model.state_dict().items():
-                                    if any(x in name for x in ["_flat_param", "lora_"]):
-                                        continue
-                                    name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
-                                    params[name] = (
-                                        param.full_tensor().detach().cpu()
-                                        if hasattr(param, "full_tensor")
-                                        else param.detach().cpu()
-                                    )
-                                model = model.to(orig_dev)
-                            finally:
-                                _merge_or_unmerge_lora(False)
-                        peft_config = None
-                    else:
-                        params = __collect_lora_params()
-                else:
-                    params = self.module.state_dict()
-'''
+                        try:
+                            _rlsd_loop = _rlsd_asyncio.get_event_loop()
+                        except RuntimeError:
+                            _rlsd_loop = None
+                        if _rlsd_loop is None:
+                            _rlsd_asyncio.run(_rlsd_lora_result)
+                        elif _rlsd_loop.is_running():
+                            _rlsd_asyncio.run_coroutine_threadsafe(
+                                _rlsd_lora_result,
+                                _rlsd_loop,
+                            ).result()
+                        else:
+                            _rlsd_loop.run_until_complete(_rlsd_lora_result)'''
 
 
-def _patch_fsdp_vllm_lora_merge_on_disk() -> None:
-    """Patch old veRL FSDP-vLLM sharding so async vLLM avoids llm_engine.add_lora."""
+def _patch_fsdp_vllm_add_lora_on_disk() -> None:
+    """Patch old veRL FSDP-vLLM sharding to support vLLM v1 LoRA sync."""
     try:
         mod = importlib.import_module("verl.workers.sharding_manager.fsdp_vllm")
     except Exception:
@@ -134,12 +124,12 @@ def _patch_fsdp_vllm_lora_merge_on_disk() -> None:
         return
     with open(path, encoding="utf-8") as f:
         text = f.read()
-    if "RLSD_MERGE_LORA_FOR_ASYNC_VLLM" in text:
+    if "RLSD_ASYNC_VLLM_ADD_LORA_PATCH" in text:
         return
-    if _FSDP_VLLM_LORA_BLOCK_OLD not in text:
+    if _FSDP_VLLM_ADD_LORA_OLD not in text:
         return
     with open(path, "w", encoding="utf-8") as f:
-        f.write(text.replace(_FSDP_VLLM_LORA_BLOCK_OLD, _FSDP_VLLM_LORA_BLOCK_NEW, 1))
+        f.write(text.replace(_FSDP_VLLM_ADD_LORA_OLD, _FSDP_VLLM_ADD_LORA_NEW, 1))
 
 
 def _patch_ray_init_for_vllm() -> None:
@@ -183,9 +173,10 @@ def _patch_ray_init_for_vllm() -> None:
 
 def main() -> None:
     _patch_verl_vllm_async_server_on_disk()
-    _patch_fsdp_vllm_lora_merge_on_disk()
+    _patch_fsdp_vllm_add_lora_on_disk()
     _patch_ray_init_for_vllm()
     _patch_compute_advantage()
+    patch_rollout_length_logging()
     patch_teacher_ema()
     module_name = os.environ.get("VERL_MAIN_MODULE", "verl.trainer.main_ppo")
     module = importlib.import_module(module_name)
