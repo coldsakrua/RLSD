@@ -77,8 +77,8 @@ def _patch_verl_vllm_async_server_on_disk() -> None:
 
 
 def _patch_ray_init_for_vllm() -> None:
-    """Ensure Ray workers inherit VLLM_USE_V1=1 and the training cluster RAY_ADDRESS."""
-    os.environ.setdefault("VLLM_USE_V1", "1")
+    """Ensure Ray workers inherit the vLLM mode and training cluster RAY_ADDRESS."""
+    os.environ.setdefault("VLLM_USE_V1", "0")
     try:
         import ray
     except Exception:
@@ -90,7 +90,7 @@ def _patch_ray_init_for_vllm() -> None:
     def patched_init(*args, **kwargs):
         runtime_env = dict(kwargs.get("runtime_env") or {})
         env_vars = dict(runtime_env.get("env_vars") or {})
-        env_vars.setdefault("VLLM_USE_V1", os.environ.get("VLLM_USE_V1", "1"))
+        env_vars.setdefault("VLLM_USE_V1", os.environ.get("VLLM_USE_V1", "0"))
         if os.environ.get("RAY_ADDRESS"):
             env_vars.setdefault("RAY_ADDRESS", os.environ["RAY_ADDRESS"])
         if os.environ.get("RAY_TMPDIR"):
