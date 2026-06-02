@@ -130,7 +130,9 @@ def _rlsd_add_lora(sharding_manager: Any, lora_request: Any) -> None:
         raise AttributeError(
             "vLLM exposes add_lora but was started without a LoRA manager. "
             "Enable actor_rollout_ref.rollout.engine_kwargs.vllm.enable_lora=true "
-            "and set max_loras/max_lora_rank for LoRA rollout sync."
+            "and set max_loras/max_lora_rank for LoRA rollout sync. If LoRA "
+            "merge is enabled, also set actor_rollout_ref.model.lora.merge=false "
+            "so vLLM starts in adapter mode."
         ) from last_error
     raise AttributeError(
         "RLSD failed to find a vLLM add_lora API; this veRL/vLLM combination "
