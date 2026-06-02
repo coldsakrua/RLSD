@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o logs/rlsd_4b.%j.out
+#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/rlsd_4b.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -41,10 +41,12 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-4}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}"
 LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-2}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_DIR="${BASE_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+BASE_DIR="${BASE_DIR:-${SLURM_SUBMIT_DIR:-/gpfs/share/home/2501210611/RLSD}}"
+if [[ "$(basename "${BASE_DIR}")" == "verl" ]]; then
+    BASE_DIR="$(cd "${BASE_DIR}/.." && pwd)"
+fi
+SCRIPT_DIR="${BASE_DIR}/verl"
 cd "${BASE_DIR}"
-mkdir -p logs
 
 CONDA_ENV="${CONDA_ENV:-anchor}"
 if command -v conda >/dev/null 2>&1; then
@@ -58,9 +60,12 @@ export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH
 export PYTHONPATH="${SCRIPT_DIR}:${BASE_DIR}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export RAY_TMPDIR="${RAY_TMPDIR:-${BASE_DIR}/outputs/ray_tmp}"
-export TMPDIR="${TMPDIR:-${BASE_DIR}/outputs/tmp}"
+# Ray AF_UNIX sockets must stay under 107 bytes; avoid long GPFS paths.
+_RAY_JOB_TAG="${SLURM_JOB_ID:-$$}"
+export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/ray_${_RAY_JOB_TAG}}"
+export TMPDIR="${TMPDIR:-/tmp/rlsd_${_RAY_JOB_TAG}}"
 mkdir -p "${RAY_TMPDIR}" "${TMPDIR}"
 unset ROCR_VISIBLE_DEVICES
 
@@ -201,19 +206,19 @@ VERL_ARGS=(
     "++actor_rollout_ref.rollout.multi_turn.sampling_params.presence_penalty=${PRESENCE_PENALTY}"
     "++actor_rollout_ref.rollout.agent.num_workers=${AGENT_LOOP_WORKERS}"
     "++actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_rlsd.teacher_agent.RLSDTeacherAgentLoopManager"
-    "distillation.enabled=true"
-    "distillation.nnodes=1"
-    "distillation.n_gpus_per_node=${TEACHER_GPUS_PER_NODE}"
-    "distillation.distillation_loss.topk=${DISTILLATION_TOPK}"
-    "distillation.distillation_loss.use_task_rewards=${DISTILLATION_USE_TASK_REWARDS}"
-    "distillation.distillation_loss.distillation_loss_coef=${DISTILLATION_LOSS_COEF}"
-    "distillation.distillation_loss.use_policy_gradient=${USE_POLICY_GRAD_DISTILL}"
-    "distillation.teacher_models.teacher_model.model_path=${MODEL_PATH}"
-    "distillation.teacher_models.teacher_model.num_replicas=1"
-    "distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=${TEACHER_TP_SIZE}"
-    "distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=${TEACHER_GPU_MEM_UTIL}"
-    "distillation.teacher_models.teacher_model.inference.max_model_len=${MAX_LENGTH}"
-    "distillation.teacher_models.teacher_model.inference.max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
+    "++distillation.enabled=true"
+    "++distillation.nnodes=1"
+    "++distillation.n_gpus_per_node=${TEACHER_GPUS_PER_NODE}"
+    "++distillation.distillation_loss.topk=${DISTILLATION_TOPK}"
+    "++distillation.distillation_loss.use_task_rewards=${DISTILLATION_USE_TASK_REWARDS}"
+    "++distillation.distillation_loss.distillation_loss_coef=${DISTILLATION_LOSS_COEF}"
+    "++distillation.distillation_loss.use_policy_gradient=${USE_POLICY_GRAD_DISTILL}"
+    "++distillation.teacher_models.teacher_model.model_path=${MODEL_PATH}"
+    "++distillation.teacher_models.teacher_model.num_replicas=1"
+    "++distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=${TEACHER_TP_SIZE}"
+    "++distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=${TEACHER_GPU_MEM_UTIL}"
+    "++distillation.teacher_models.teacher_model.inference.max_model_len=${MAX_LENGTH}"
+    "++distillation.teacher_models.teacher_model.inference.max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
     "trainer.nnodes=1"
     "trainer.n_gpus_per_node=${ACTOR_GPUS_PER_NODE}"
     "trainer.total_training_steps=${MAX_STEPS}"

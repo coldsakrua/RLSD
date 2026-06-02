@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH -o logs/cast_ema_4b.%j.out
+#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/cast_ema_4b.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n04,gpua800n21
+#SBATCH --exclude=gpua800n23
 
 set -eo pipefail
 
@@ -41,10 +41,6 @@ ADV_CLIP_HIGH="${ADV_CLIP_HIGH:-1.2}"
 
 LEARNING_RATE="${LEARNING_RATE:-1e-6}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
-WARMUP_RATIO="${WARMUP_RATIO:-0.05}"
-WARMUP_STEPS="${WARMUP_STEPS:-0}"
-LR_END="${LR_END:-1e-7}"
-LR_SCHEDULER_TYPE="${LR_SCHEDULER_TYPE:-polynomial}"
 
 NUM_GENERATIONS="${NUM_GENERATIONS:-8}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
@@ -59,10 +55,12 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-4}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}"
 LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-2}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_DIR="${BASE_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+BASE_DIR="${BASE_DIR:-${SLURM_SUBMIT_DIR:-/gpfs/share/home/2501210611/RLSD}}"
+if [[ "$(basename "${BASE_DIR}")" == "verl" ]]; then
+    BASE_DIR="$(cd "${BASE_DIR}/.." && pwd)"
+fi
+SCRIPT_DIR="${BASE_DIR}/verl"
 cd "${BASE_DIR}"
-mkdir -p logs
 
 CONDA_ENV="${CONDA_ENV:-anchor}"
 if command -v conda >/dev/null 2>&1; then
@@ -76,9 +74,12 @@ export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH
 export PYTHONPATH="${SCRIPT_DIR}:${BASE_DIR}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export RAY_TMPDIR="${RAY_TMPDIR:-${BASE_DIR}/outputs/ray_tmp}"
-export TMPDIR="${TMPDIR:-${BASE_DIR}/outputs/tmp}"
+# Ray AF_UNIX sockets must stay under 107 bytes; avoid long GPFS paths.
+_RAY_JOB_TAG="${SLURM_JOB_ID:-$$}"
+export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/ray_${_RAY_JOB_TAG}}"
+export TMPDIR="${TMPDIR:-/tmp/rlsd_${_RAY_JOB_TAG}}"
 mkdir -p "${RAY_TMPDIR}" "${TMPDIR}"
 unset ROCR_VISIBLE_DEVICES
 
@@ -109,15 +110,6 @@ MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-3072}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 MAX_LENGTH="$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))"
 MAX_TEACHER_PROMPT_LENGTH="${MAX_TEACHER_PROMPT_LENGTH:-512}"
-
-if [ "${WARMUP_STEPS}" != "0" ]; then
-    LR_WARMUP_STEPS="${WARMUP_STEPS}"
-    LR_WARMUP_RATIO="0.0"
-else
-    LR_WARMUP_STEPS="-1"
-    LR_WARMUP_RATIO="${WARMUP_RATIO:-0.0}"
-fi
-MIN_LR_RATIO="${MIN_LR_RATIO:-$(awk -v end="${LR_END}" -v lr="${LEARNING_RATE}" 'BEGIN { if (lr > 0) printf "%.8f", end / lr; else print "0.0" }')}"
 
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.9}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
@@ -211,10 +203,6 @@ VERL_ARGS=(
     "actor_rollout_ref.model.target_modules=${LORA_TARGET_MODULES}"
     "actor_rollout_ref.actor.optim.lr=${LEARNING_RATE}"
     "actor_rollout_ref.actor.optim.weight_decay=${WEIGHT_DECAY}"
-    "actor_rollout_ref.actor.optim.lr_warmup_steps=${LR_WARMUP_STEPS}"
-    "actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=${LR_WARMUP_RATIO}"
-    "actor_rollout_ref.actor.optim.lr_scheduler_type=${LR_SCHEDULER_TYPE}"
-    "actor_rollout_ref.actor.optim.min_lr_ratio=${MIN_LR_RATIO}"
     "actor_rollout_ref.actor.grad_clip=1.0"
     "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}"
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU}"
@@ -249,19 +237,19 @@ VERL_ARGS=(
     "++actor_rollout_ref.rollout.multi_turn.sampling_params.presence_penalty=${PRESENCE_PENALTY}"
     "++actor_rollout_ref.rollout.agent.num_workers=${AGENT_LOOP_WORKERS}"
     "++actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_rlsd.teacher_agent.RLSDTeacherAgentLoopManager"
-    "distillation.enabled=true"
-    "distillation.nnodes=1"
-    "distillation.n_gpus_per_node=${TEACHER_GPUS_PER_NODE}"
-    "distillation.distillation_loss.topk=${DISTILLATION_TOPK}"
-    "distillation.distillation_loss.use_task_rewards=${DISTILLATION_USE_TASK_REWARDS}"
-    "distillation.distillation_loss.distillation_loss_coef=${DISTILLATION_LOSS_COEF}"
-    "distillation.distillation_loss.use_policy_gradient=${USE_POLICY_GRAD_DISTILL}"
-    "distillation.teacher_models.teacher_model.model_path=${MODEL_PATH}"
-    "distillation.teacher_models.teacher_model.num_replicas=1"
-    "distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=${TEACHER_TP_SIZE}"
-    "distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=${TEACHER_GPU_MEM_UTIL}"
-    "distillation.teacher_models.teacher_model.inference.max_model_len=${MAX_LENGTH}"
-    "distillation.teacher_models.teacher_model.inference.max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
+    "++distillation.enabled=true"
+    "++distillation.nnodes=1"
+    "++distillation.n_gpus_per_node=${TEACHER_GPUS_PER_NODE}"
+    "++distillation.distillation_loss.topk=${DISTILLATION_TOPK}"
+    "++distillation.distillation_loss.use_task_rewards=${DISTILLATION_USE_TASK_REWARDS}"
+    "++distillation.distillation_loss.distillation_loss_coef=${DISTILLATION_LOSS_COEF}"
+    "++distillation.distillation_loss.use_policy_gradient=${USE_POLICY_GRAD_DISTILL}"
+    "++distillation.teacher_models.teacher_model.model_path=${MODEL_PATH}"
+    "++distillation.teacher_models.teacher_model.num_replicas=1"
+    "++distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=${TEACHER_TP_SIZE}"
+    "++distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=${TEACHER_GPU_MEM_UTIL}"
+    "++distillation.teacher_models.teacher_model.inference.max_model_len=${MAX_LENGTH}"
+    "++distillation.teacher_models.teacher_model.inference.max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
     "++distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm.enable_lora=true"
     "++distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm.max_loras=1"
     "++distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm.max_lora_rank=${LORA_R}"

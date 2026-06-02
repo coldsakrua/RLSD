@@ -350,6 +350,25 @@ def _patch_ray_trainer_init() -> None:
     trainer_cls._rlsd_teacher_ema_patched = True
 
 
+def _unwrap_ray_actor_class(cls: Any) -> Any:
+    """Return the underlying Python class for a @ray.remote actor wrapper."""
+    inner = cls
+    for _ in range(4):
+        if hasattr(inner, "__ray_actor_class__"):
+            inner = inner.__ray_actor_class__
+            if hasattr(inner, "__ray_metadata__"):
+                meta = inner.__ray_metadata__
+                modified = getattr(meta, "modified_class", None)
+                if modified is not None:
+                    inner = modified
+            continue
+        if hasattr(inner, "__wrapped__"):
+            inner = inner.__wrapped__
+            continue
+        break
+    return inner
+
+
 def _patch_teacher_model_manager_lora() -> None:
     try:
         teacher_model_mod = importlib.import_module("verl.experimental.teacher_loop.teacher_model")
@@ -387,10 +406,27 @@ def _patch_teacher_vllm_server_lora() -> None:
     except Exception:
         return
     server_cls = getattr(server_mod, "AsyncvLLMServer", None)
-    if server_cls is None or getattr(server_cls, "_rlsd_teacher_ema_patched", False):
+    if server_cls is None:
         return
 
-    original_property = server_cls.lora_as_adapter
+    target_cls = _unwrap_ray_actor_class(server_cls)
+    if getattr(target_cls, "_rlsd_teacher_ema_patched", False):
+        return
+
+    original_property = getattr(target_cls, "lora_as_adapter", None)
+    if original_property is None:
+        logger.info(
+            "Skip teacher EMA vLLM lora_as_adapter patch: %s has no lora_as_adapter "
+            "(installed veRL may not expose this hook; EMA HTTP adapter load still attempted).",
+            getattr(target_cls, "__name__", repr(target_cls)),
+        )
+        return
+    if not isinstance(original_property, property):
+        logger.warning(
+            "Skip teacher EMA vLLM lora_as_adapter patch: attribute is %s, not property.",
+            type(original_property).__name__,
+        )
+        return
 
     def lora_as_adapter(self):  # type: ignore[no-untyped-def]
         if bool(getattr(self, "is_teacher_model", False)) and os.environ.get(
@@ -399,8 +435,9 @@ def _patch_teacher_vllm_server_lora() -> None:
             return True
         return original_property.fget(self)
 
-    server_cls.lora_as_adapter = property(lora_as_adapter)
-    server_cls._rlsd_teacher_ema_patched = True
+    target_cls.lora_as_adapter = property(lora_as_adapter)
+    target_cls._rlsd_teacher_ema_patched = True
+    logger.info("Patched %s.lora_as_adapter for teacher EMA LoRA.", getattr(target_cls, "__name__", target_cls))
 
 
 def patch_teacher_ema() -> None:

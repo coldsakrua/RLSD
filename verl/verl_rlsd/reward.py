@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+import importlib.util
 import re
 import os
 from typing import Any, Mapping
 
-from .prompt_utils import extract_solution
+
+def _load_extract_solution():
+    try:
+        from verl_rlsd.prompt_utils import extract_solution
+
+        return extract_solution
+    except ImportError:
+        pass
+    # veRL loads this file as a standalone module, so relative imports fail.
+    prompt_utils_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt_utils.py")
+    spec = importlib.util.spec_from_file_location("verl_rlsd_prompt_utils", prompt_utils_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.extract_solution
+
+
+extract_solution = _load_extract_solution()
 
 try:
     from reward_fn import (

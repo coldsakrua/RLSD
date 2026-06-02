@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o logs/grpo_4b.%j.out
+#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/grpo_4b.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -37,10 +37,12 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-4}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}"
 LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-2}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_DIR="${BASE_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+BASE_DIR="${BASE_DIR:-${SLURM_SUBMIT_DIR:-/gpfs/share/home/2501210611/RLSD}}"
+if [[ "$(basename "${BASE_DIR}")" == "verl" ]]; then
+    BASE_DIR="$(cd "${BASE_DIR}/.." && pwd)"
+fi
+SCRIPT_DIR="${BASE_DIR}/verl"
 cd "${BASE_DIR}"
-mkdir -p logs
 
 CONDA_ENV="${CONDA_ENV:-anchor}"
 if command -v conda >/dev/null 2>&1; then
@@ -54,9 +56,12 @@ export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH
 export PYTHONPATH="${SCRIPT_DIR}:${BASE_DIR}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export RAY_TMPDIR="${RAY_TMPDIR:-${BASE_DIR}/outputs/ray_tmp}"
-export TMPDIR="${TMPDIR:-${BASE_DIR}/outputs/tmp}"
+# Ray AF_UNIX sockets must stay under 107 bytes; avoid long GPFS paths.
+_RAY_JOB_TAG="${SLURM_JOB_ID:-$$}"
+export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/ray_${_RAY_JOB_TAG}}"
+export TMPDIR="${TMPDIR:-/tmp/rlsd_${_RAY_JOB_TAG}}"
 mkdir -p "${RAY_TMPDIR}" "${TMPDIR}"
 unset ROCR_VISIBLE_DEVICES
 
