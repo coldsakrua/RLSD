@@ -74,7 +74,7 @@ export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH
 export PYTHONPATH="${SCRIPT_DIR}:${BASE_DIR}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
-export VLLM_USE_V1="${VLLM_USE_V1:-0}"
+export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 if [[ "${PYTORCH_CUDA_ALLOC_CONF:-}" == *"expandable_segments:True"* ]]; then
     unset PYTORCH_CUDA_ALLOC_CONF
 fi
@@ -126,6 +126,7 @@ AGENT_LOOP_WORKERS="${AGENT_LOOP_WORKERS:-8}"
 LORA_R="${LORA_R:-64}"
 LORA_ALPHA="${LORA_ALPHA:-128}"
 LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]}"
+export RLSD_MERGE_LORA_FOR_ASYNC_VLLM="${RLSD_MERGE_LORA_FOR_ASYNC_VLLM:-true}"
 
 DAPO_EPSILON="${DAPO_EPSILON:-0.2}"
 DAPO_EPSILON_HIGH="${DAPO_EPSILON_HIGH:-0.28}"
@@ -204,6 +205,7 @@ VERL_ARGS=(
     "actor_rollout_ref.model.lora_rank=${LORA_R}"
     "actor_rollout_ref.model.lora_alpha=${LORA_ALPHA}"
     "actor_rollout_ref.model.target_modules=${LORA_TARGET_MODULES}"
+    "++actor_rollout_ref.model.lora.merge=${RLSD_MERGE_LORA_FOR_ASYNC_VLLM}"
     "actor_rollout_ref.actor.optim.lr=${LEARNING_RATE}"
     "actor_rollout_ref.actor.optim.weight_decay=${WEIGHT_DECAY}"
     "actor_rollout_ref.actor.grad_clip=1.0"

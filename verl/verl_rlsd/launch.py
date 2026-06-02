@@ -76,9 +76,75 @@ def _patch_verl_vllm_async_server_on_disk() -> None:
         f.write(text.replace(_RAY_INIT_OLD, _RAY_INIT_NEW, 1))
 
 
+_FSDP_VLLM_LORA_BLOCK_OLD = '''                if hasattr(peft_model, "peft_config"):
+                    peft_config = peft_model.peft_config.get("default", None)
+                    params = __collect_lora_params()
+                else:
+                    params = self.module.state_dict()
+'''
+
+_FSDP_VLLM_LORA_BLOCK_NEW = '''                if hasattr(peft_model, "peft_config"):
+                    peft_config = peft_model.peft_config.get("default", None)
+                    if os.environ.get("RLSD_MERGE_LORA_FOR_ASYNC_VLLM", "").lower() in {"1", "true", "yes"}:
+                        from peft.tuners.lora import LoraLayer
+
+                        def _merge_or_unmerge_lora(do_merge):
+                            for _module in peft_model.modules():
+                                if isinstance(_module, LoraLayer):
+                                    if do_merge and not getattr(_module, "merged", False):
+                                        _module.merge()
+                                    elif not do_merge and getattr(_module, "merged", False):
+                                        _module.unmerge()
+
+                        params = OrderedDict()
+                        with FSDP.summon_full_params(self.module, writeback=False):
+                            _merge_or_unmerge_lora(True)
+                            try:
+                                model = peft_model.base_model.model
+                                orig_dev = "cpu" if "cpu" in str(next(model.parameters()).device) else get_device_name()
+                                model = model.to("cpu")
+                                for name, param in model.state_dict().items():
+                                    if any(x in name for x in ["_flat_param", "lora_"]):
+                                        continue
+                                    name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
+                                    params[name] = (
+                                        param.full_tensor().detach().cpu()
+                                        if hasattr(param, "full_tensor")
+                                        else param.detach().cpu()
+                                    )
+                                model = model.to(orig_dev)
+                            finally:
+                                _merge_or_unmerge_lora(False)
+                        peft_config = None
+                    else:
+                        params = __collect_lora_params()
+                else:
+                    params = self.module.state_dict()
+'''
+
+
+def _patch_fsdp_vllm_lora_merge_on_disk() -> None:
+    """Patch old veRL FSDP-vLLM sharding so async vLLM avoids llm_engine.add_lora."""
+    try:
+        mod = importlib.import_module("verl.workers.sharding_manager.fsdp_vllm")
+    except Exception:
+        return
+    path = getattr(mod, "__file__", None)
+    if not path or not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    if "RLSD_MERGE_LORA_FOR_ASYNC_VLLM" in text:
+        return
+    if _FSDP_VLLM_LORA_BLOCK_OLD not in text:
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text.replace(_FSDP_VLLM_LORA_BLOCK_OLD, _FSDP_VLLM_LORA_BLOCK_NEW, 1))
+
+
 def _patch_ray_init_for_vllm() -> None:
     """Ensure Ray workers inherit the vLLM mode and training cluster RAY_ADDRESS."""
-    os.environ.setdefault("VLLM_USE_V1", "0")
+    os.environ.setdefault("VLLM_USE_V1", "1")
     try:
         import ray
     except Exception:
@@ -90,7 +156,12 @@ def _patch_ray_init_for_vllm() -> None:
     def patched_init(*args, **kwargs):
         runtime_env = dict(kwargs.get("runtime_env") or {})
         env_vars = dict(runtime_env.get("env_vars") or {})
-        env_vars.setdefault("VLLM_USE_V1", os.environ.get("VLLM_USE_V1", "0"))
+        env_vars.setdefault("VLLM_USE_V1", os.environ.get("VLLM_USE_V1", "1"))
+        if os.environ.get("RLSD_MERGE_LORA_FOR_ASYNC_VLLM"):
+            env_vars.setdefault(
+                "RLSD_MERGE_LORA_FOR_ASYNC_VLLM",
+                os.environ["RLSD_MERGE_LORA_FOR_ASYNC_VLLM"],
+            )
         if os.environ.get("RAY_ADDRESS"):
             env_vars.setdefault("RAY_ADDRESS", os.environ["RAY_ADDRESS"])
         if os.environ.get("RAY_TMPDIR"):
@@ -112,6 +183,7 @@ def _patch_ray_init_for_vllm() -> None:
 
 def main() -> None:
     _patch_verl_vllm_async_server_on_disk()
+    _patch_fsdp_vllm_lora_merge_on_disk()
     _patch_ray_init_for_vllm()
     _patch_compute_advantage()
     patch_teacher_ema()
