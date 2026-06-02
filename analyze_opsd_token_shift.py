@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from peft import PeftModel
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from data_utils import (
@@ -244,6 +245,7 @@ def _record_opsd_trajectories_for_prompt(
     prompt_ids: torch.Tensor,
     rollout_prompt_text: str,
     teacher_prompt_text: str,
+    teacher_use_student_prompt: bool,
     completion_ids_list: List[torch.Tensor],
     completion_list: List[str],
     model,
@@ -262,13 +264,16 @@ def _record_opsd_trajectories_for_prompt(
     rewards = [float(r) for r in rewards]
     correctness = [bool(r > float(args.reward_binary_threshold)) for r in rewards]
 
-    teacher_prefix_ids = tokenizer(
-        teacher_prompt_text,
-        return_tensors="pt",
-        add_special_tokens=False,
-        truncation=True,
-        max_length=int(args.max_teacher_prompt_length),
-    )["input_ids"][0].to(resolved_device)
+    if bool(teacher_use_student_prompt):
+        teacher_prefix_ids = prompt_ids
+    else:
+        teacher_prefix_ids = tokenizer(
+            teacher_prompt_text,
+            return_tensors="pt",
+            add_special_tokens=False,
+            truncation=True,
+            max_length=int(args.max_teacher_prompt_length),
+        )["input_ids"][0].to(resolved_device)
 
     for j, (comp_ids, comp_text, rew, ok) in enumerate(
         zip(completion_ids_list, completion_list, rewards, correctness)
@@ -464,6 +469,12 @@ def main():
         type=str,
         default="{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n",
     )
+    parser.add_argument(
+        "--teacher_use_student_prompt",
+        type=_to_bool,
+        default=False,
+        help="If true, teacher prefix exactly reuses the student prompt prefix ids.",
+    )
     parser.add_argument("--summary_top_k", type=int, default=30)
     parser.add_argument(
         "--batch_size",
@@ -553,7 +564,15 @@ def main():
     old_padding_side = getattr(tokenizer, "padding_side", "right")
     tokenizer.padding_side = "left"
     try:
-        for chunk_start in range(0, len(rows), batch_size):
+        total_chunks = (len(rows) + batch_size - 1) // batch_size
+        chunk_iter = range(0, len(rows), batch_size)
+        for chunk_start in tqdm(
+            chunk_iter,
+            total=total_chunks,
+            desc="Analyzing prompts",
+            unit="batch",
+            leave=True,
+        ):
             chunk = rows[chunk_start : chunk_start + batch_size]
             rollout_texts: List[str] = []
             teacher_texts: List[str] = []
@@ -568,7 +587,9 @@ def main():
                     )
                 )
                 teacher_texts.append(
-                    args.teacher_prompt_template.format(
+                    rollout_texts[-1]
+                    if bool(args.teacher_use_student_prompt)
+                    else args.teacher_prompt_template.format(
                         prompt=_prompt_to_teacher_text(prompt_obj),
                         solution=solution,
                     )
@@ -655,6 +676,7 @@ def main():
                     prompt_ids=prompt_ids,
                     rollout_prompt_text=rollout_prompt_text,
                     teacher_prompt_text=teacher_prompt_text,
+                    teacher_use_student_prompt=bool(args.teacher_use_student_prompt),
                     completion_ids_list=completion_ids_list,
                     completion_list=completion_list,
                     model=model,
@@ -711,6 +733,7 @@ def main():
             "allow_cpu_fallback": bool(args.allow_cpu_fallback),
             "attn_implementation": args.attn_implementation,
             "teacher_prompt_template": args.teacher_prompt_template,
+            "teacher_use_student_prompt": bool(args.teacher_use_student_prompt),
             "reward_binary_threshold": float(args.reward_binary_threshold),
             "reward_boxed_last_token_fraction": float(args.reward_boxed_last_token_fraction),
             "normalize_math_prompt_to_standard_suffix": bool(args.normalize_math_prompt_to_standard_suffix),

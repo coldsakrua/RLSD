@@ -757,6 +757,14 @@ class OfficialOPSDTrainer(Trainer):
             self._log_metric("opsd/completion_length", self._reduce_scalar_mean(lengths.mean()))
             self._log_metric("opsd/completion_length_min", self._reduce_scalar_mean(lengths.min()))
             self._log_metric("opsd/completion_length_max", self._reduce_scalar_mean(lengths.max()))
+            student_log_probs = F.log_softmax(student_logits, dim=-1)
+            student_probs = student_log_probs.exp()
+            token_entropy = -(student_probs * student_log_probs).sum(dim=-1)
+            entropy_mean = (token_entropy * completion_mask.float()).sum() / valid_tokens
+            entropy_value = float(self.accelerator.gather_for_metrics(entropy_mean).mean().item())
+            self._log_metric("entropy", entropy_value)
+            self._log_metric("rl/entropy", entropy_value)
+            self._log_metric("opsd/entropy", entropy_value)
 
         if return_outputs:
             return loss, {"loss": loss}
