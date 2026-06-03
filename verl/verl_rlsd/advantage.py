@@ -225,6 +225,29 @@ def _teacher_student_gap(response_mask: torch.Tensor, kwargs: dict[str, Any]) ->
     return (teacher - student).detach() * response_mask.float()
 
 
+def _teacher_shaping_length_cap(config: Any) -> int:
+    cap = int(_cfg_get(config, "algorithm.rlsd.teacher_shaping_length_cap", 0) or 0)
+    if cap > 0:
+        return cap
+    # Backward-compatible alias: older scripts only set max_teacher_prompt_length.
+    return int(_cfg_get(config, "algorithm.rlsd.max_teacher_prompt_length", 0) or 0)
+
+
+def _blend_teacher_shaping(
+    base_adv: torch.Tensor,
+    shaped_adv: torch.Tensor,
+    response_mask: torch.Tensor,
+    teacher_shaping_length_cap: int,
+) -> torch.Tensor:
+    """Keep GRPO/base A outside the cap; apply teacher RLSD shaping only inside."""
+    if teacher_shaping_length_cap <= 0:
+        return shaped_adv
+    mask = response_mask.float()
+    response_pos = torch.cumsum(mask, dim=-1)
+    within_cap = (response_pos <= float(teacher_shaping_length_cap)) & mask.bool()
+    return torch.where(within_cap, shaped_adv, base_adv)
+
+
 def _safe_exp_gap(x: torch.Tensor) -> torch.Tensor:
     return torch.exp(torch.clamp(x, min=-20.0, max=20.0))
 
@@ -258,7 +281,14 @@ def rlsd_grpo_advantage(
     weight = _safe_exp_gap(sign * g)
     weight = torch.clamp(weight, min=max(0.0, 1.0 - eps_w), max=1.0 + eps_w)
     shaped = base * ((1.0 - lam) + lam * weight)
-    shaped = shaped * response_mask.float()
+    mask = response_mask.float()
+    shaped = _blend_teacher_shaping(
+        base,
+        shaped,
+        mask,
+        _teacher_shaping_length_cap(config),
+    )
+    shaped = shaped * mask
     return shaped, shaped
 
 
@@ -313,6 +343,7 @@ def _strict_split_common(
     wrong_high = float(_cfg_get(config, "algorithm.rlsd.wrong_weight_clip_high", 1.2))
     adv_low = float(_cfg_get(config, "algorithm.rlsd.adv_clip_low", -1.2))
     adv_high = float(_cfg_get(config, "algorithm.rlsd.adv_clip_high", 1.2))
+    teacher_shaping_length_cap = _teacher_shaping_length_cap(config)
 
     def shape(base_adv: torch.Tensor) -> torch.Tensor:
         sign = torch.sign(base_adv)
@@ -348,6 +379,9 @@ def _strict_split_common(
             )
         return shaped * mask
 
+    def apply_teacher_shaping(base_adv: torch.Tensor) -> torch.Tensor:
+        return _blend_teacher_shaping(base_adv, shape(base_adv), mask, teacher_shaping_length_cap)
+
     mixed_base = seq_adv_1d.unsqueeze(1).expand_as(mask) * mask
     all_correct_base = (
         torch.full_like(mask, float(_cfg_get(config, "algorithm.rlsd.all_correct_base_advantage", 1.0)))
@@ -361,9 +395,9 @@ def _strict_split_common(
     )
 
     token_adv = torch.zeros_like(mask)
-    token_adv = torch.where(all_correct, shape(all_correct_base), token_adv)
-    token_adv = torch.where(all_wrong, shape(all_wrong_base), token_adv)
-    token_adv = torch.where(mixed, shape(mixed_base), token_adv)
+    token_adv = torch.where(all_correct, apply_teacher_shaping(all_correct_base), token_adv)
+    token_adv = torch.where(all_wrong, apply_teacher_shaping(all_wrong_base), token_adv)
+    token_adv = torch.where(mixed, apply_teacher_shaping(mixed_base), token_adv)
 
     positive_adv_length_cap = int(_cfg_get(config, "algorithm.rlsd.positive_adv_length_cap", 0) or 0)
     if positive_adv_length_cap > 0:

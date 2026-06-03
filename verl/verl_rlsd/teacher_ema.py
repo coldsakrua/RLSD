@@ -413,6 +413,82 @@ def _teacher_ema_decay() -> float:
     return min(max(decay, 0.0), 1.0)
 
 
+def _get_trainer_global_step(default: int = 0) -> int:
+    if _TRAINER_REF is None:
+        return default
+    trainer = _TRAINER_REF()
+    if trainer is None:
+        return default
+    return int(getattr(trainer, "global_steps", default) or default)
+
+
+def _internal_teacher_start_step() -> int:
+    raw = os.environ.get("RLSD_INTERNAL_TEACHER_START_STEP", "2")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
+
+
+def _internal_teacher_base_until_step() -> int:
+    raw = os.environ.get("RLSD_INTERNAL_TEACHER_BASE_UNTIL_STEP", "10")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 10
+
+
+def _internal_teacher_snapshot_interval() -> int:
+    raw = os.environ.get("RLSD_INTERNAL_TEACHER_SNAPSHOT_INTERVAL", "10")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 10
+
+
+def _internal_teacher_snapshot_mode() -> bool:
+    return _env_truthy("RLSD_INTERNAL_TEACHER_SNAPSHOT_MODE", False)
+
+
+def _should_compute_internal_teacher_logprobs() -> bool:
+    if not _env_truthy("RLSD_INTERNAL_TEACHER_LOGPROB", False):
+        return False
+    return _get_trainer_global_step() >= _internal_teacher_start_step()
+
+
+def _resolve_internal_teacher_weights(
+    worker: Any,
+    params: list[tuple[str, torch.nn.Parameter]],
+) -> dict[str, torch.Tensor] | None:
+    step = _get_trainer_global_step()
+    if _internal_teacher_snapshot_mode():
+        if step <= _internal_teacher_base_until_step():
+            return {name: torch.zeros_like(param) for name, param in params}
+        snapshot = getattr(worker, "_rlsd_internal_teacher_snapshot", None)
+        if isinstance(snapshot, dict) and snapshot:
+            resolved: dict[str, torch.Tensor] = {}
+            for name, param in params:
+                teacher_value = snapshot.get(name)
+                if teacher_value is None or tuple(teacher_value.shape) != tuple(param.shape):
+                    return None
+                resolved[name] = teacher_value
+            return resolved
+        logger.warning(
+            "Internal teacher snapshot missing at step %s; falling back to base model.",
+            step,
+        )
+        return {name: torch.zeros_like(param) for name, param in params}
+
+    state = _ensure_internal_ema_state(worker, params)
+    resolved = {}
+    for name, param in params:
+        teacher_value = state.get(name)
+        if teacher_value is None or tuple(teacher_value.shape) != tuple(param.shape):
+            return None
+        resolved[name] = teacher_value
+    return resolved
+
+
 def _ensure_internal_ema_state(worker: Any, params: list[tuple[str, torch.nn.Parameter]]) -> dict[str, torch.Tensor]:
     state = getattr(worker, "_rlsd_internal_teacher_ema_state", None)
     if not isinstance(state, dict) or not state:
@@ -446,6 +522,28 @@ def _update_internal_teacher_ema(worker: Any) -> bool:
     return True
 
 
+def _maybe_update_internal_teacher_snapshot(worker: Any) -> bool:
+    if not _env_truthy("RLSD_INTERNAL_TEACHER_LOGPROB", False):
+        return False
+    if not _internal_teacher_snapshot_mode():
+        return _update_internal_teacher_ema(worker)
+    step = _get_trainer_global_step()
+    interval = _internal_teacher_snapshot_interval()
+    if step <= 0 or step % interval != 0:
+        return False
+    _, params = _find_lora_module(worker)
+    if not params:
+        if not getattr(worker, "_rlsd_internal_teacher_warned", False):
+            logger.warning("Internal teacher snapshot enabled but no LoRA parameters were found.")
+            setattr(worker, "_rlsd_internal_teacher_warned", True)
+        return False
+    snapshot = {name: param.detach().clone() for name, param in params}
+    setattr(worker, "_rlsd_internal_teacher_snapshot", snapshot)
+    setattr(worker, "_rlsd_internal_teacher_snapshot_at_step", step)
+    logger.info("Updated internal teacher LoRA snapshot at global step %s.", step)
+    return True
+
+
 def _teacher_tensor_from_output(output: Any) -> torch.Tensor | None:
     for key in ("old_log_probs", "old_log_prob", "log_probs", "log_prob"):
         value = _get_item(output, key)
@@ -455,19 +553,18 @@ def _teacher_tensor_from_output(output: Any) -> torch.Tensor | None:
 
 
 def _compute_internal_teacher_logprobs(worker: Any, data: Any, compute_fn: Any = None) -> torch.Tensor | None:
+    if not _should_compute_internal_teacher_logprobs():
+        return None
     _, params = _find_lora_module(worker)
     if not params:
         return None
-    state = _ensure_internal_ema_state(worker, params)
-    teacher_values: list[tuple[torch.nn.Parameter, torch.Tensor]] = []
-    for name, param in params:
-        teacher_value = state.get(name)
-        if teacher_value is None or tuple(teacher_value.shape) != tuple(param.shape):
-            return None
-        teacher_values.append((param, teacher_value))
+    teacher_weights = _resolve_internal_teacher_weights(worker, params)
+    if teacher_weights is None:
+        return None
     backups: list[tuple[torch.nn.Parameter, torch.Tensor]] = []
     with torch.no_grad():
-        for param, teacher_value in teacher_values:
+        for name, param in params:
+            teacher_value = teacher_weights[name]
             backups.append((param, param.detach().clone()))
             param.copy_(teacher_value.to(device=param.device, dtype=param.dtype))
         try:
@@ -516,14 +613,21 @@ def _patch_actor_worker_internal_teacher() -> None:
             def compute_log_prob(self, data, _original_compute=original_compute):  # type: ignore[no-untyped-def]
                 output = _original_compute(self, data)
                 if _env_truthy("RLSD_INTERNAL_TEACHER_LOGPROB", False):
-                    teacher_logprobs = _compute_internal_teacher_logprobs(self, data, _original_compute)
-                    if teacher_logprobs is None:
-                        message = "Internal EMA teacher logprobs were requested but could not be computed."
-                        if _env_truthy("RLSD_INTERNAL_TEACHER_STRICT", True):
-                            raise RuntimeError(message)
-                        logger.warning(message)
+                    if _should_compute_internal_teacher_logprobs():
+                        teacher_logprobs = _compute_internal_teacher_logprobs(self, data, _original_compute)
+                        if teacher_logprobs is None:
+                            message = "Internal EMA teacher logprobs were requested but could not be computed."
+                            if _env_truthy("RLSD_INTERNAL_TEACHER_STRICT", True):
+                                raise RuntimeError(message)
+                            logger.warning(message)
+                        else:
+                            _set_item(output, "teacher_logprobs", teacher_logprobs)
                     else:
-                        _set_item(output, "teacher_logprobs", teacher_logprobs)
+                        logger.debug(
+                            "Skipping internal teacher logprobs at global step %s (< start step %s).",
+                            _get_trainer_global_step(),
+                            _internal_teacher_start_step(),
+                        )
                 return output
 
             worker_cls.compute_log_prob = compute_log_prob
@@ -535,7 +639,7 @@ def _patch_actor_worker_internal_teacher() -> None:
                 def update_actor(self, data, _original_update=original_update):  # type: ignore[no-untyped-def]
                     result = _original_update(self, data)
                     try:
-                        _update_internal_teacher_ema(self)
+                        _maybe_update_internal_teacher_snapshot(self)
                     except Exception as exc:
                         if _env_truthy("RLSD_INTERNAL_TEACHER_STRICT", True):
                             raise

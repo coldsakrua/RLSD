@@ -1,22 +1,21 @@
 #!/bin/bash
-#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/cast_ema_4b.%j.out
+#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/cast_teacher10_4b.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n07
+#SBATCH --exclude=gpua800n23
 
 set -eo pipefail
 
-# Strict-split sign-flip RLSD plus wrong-path positive boost with an EMA teacher.
-# Teacher uses the exact same prompt tokens as the student, while teacher
-# weights follow an EMA of student LoRA so token gaps stay non-zero.
-#
-# Defaults are length-safe: GRPO assigns A to every token, teacher RLSD shaping
-# applies only to the first TEACHER_SHAPING_LENGTH_CAP response tokens; tail keeps GRPO A.
-RUN_CONFIG="${RUN_CONFIG:-cast_ema_len_safe_4b}"
+# Strict-split sign-flip RLSD with periodic internal-teacher snapshots (not EMA):
+#   step 1: skip teacher logprob (student/teacher would be identical)
+#   steps 2-10: teacher = base model (zero LoRA)
+#   step 10: snapshot student LoRA
+#   steps 11-20: teacher = step-10 snapshot; step 20 refreshes snapshot; and so on
+RUN_CONFIG="${RUN_CONFIG:-cast_teacher10_4b}"
 ADV_ESTIMATOR="${ADV_ESTIMATOR:-rlsd_strict_split_flip_wrong_boost}"
 REWARD_FUNCTION_NAME="${REWARD_FUNCTION_NAME:-compute_score}"
 TOKEN_GAP_LAMBDA="${TOKEN_GAP_LAMBDA:-0.5}"
@@ -25,12 +24,12 @@ TEACHER_PROMPT_MODE="${TEACHER_PROMPT_MODE:-identical_student}"
 OFFICIAL_TEACHER_PROMPT="${OFFICIAL_TEACHER_PROMPT:-false}"
 DISTILLATION_LOSS_COEF="${DISTILLATION_LOSS_COEF:-0.0}"
 
-TEACHER_EMA_ENABLED="${TEACHER_EMA_ENABLED:-true}"
-TEACHER_EMA_DECAY="${TEACHER_EMA_DECAY:-0.995}"
-TEACHER_EMA_UPDATE_INTERVAL_STEPS="${TEACHER_EMA_UPDATE_INTERVAL_STEPS:-1}"
-TEACHER_EMA_LORA_NAME="${TEACHER_EMA_LORA_NAME:-teacher_ema}"
 INTERNAL_TEACHER_LOGPROB="${INTERNAL_TEACHER_LOGPROB:-true}"
 INTERNAL_TEACHER_STRICT="${INTERNAL_TEACHER_STRICT:-true}"
+INTERNAL_TEACHER_SNAPSHOT_MODE="${INTERNAL_TEACHER_SNAPSHOT_MODE:-true}"
+INTERNAL_TEACHER_START_STEP="${INTERNAL_TEACHER_START_STEP:-2}"
+INTERNAL_TEACHER_BASE_UNTIL_STEP="${INTERNAL_TEACHER_BASE_UNTIL_STEP:-10}"
+INTERNAL_TEACHER_SNAPSHOT_INTERVAL="${INTERNAL_TEACHER_SNAPSHOT_INTERVAL:-10}"
 
 ALL_CORRECT_BASE_ADVANTAGE="${ALL_CORRECT_BASE_ADVANTAGE:-1.0}"
 ALL_WRONG_BASE_ADVANTAGE="${ALL_WRONG_BASE_ADVANTAGE:--1.0}"
@@ -79,7 +78,6 @@ export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 if [[ "${PYTORCH_CUDA_ALLOC_CONF:-}" == *"expandable_segments:True"* ]]; then
     unset PYTORCH_CUDA_ALLOC_CONF
 fi
-# Ray AF_UNIX sockets must stay under 107 bytes; avoid long GPFS paths.
 _RAY_JOB_TAG="${SLURM_JOB_ID:-$$}"
 export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/ray_${_RAY_JOB_TAG}}"
 export TMPDIR="${TMPDIR:-/tmp/rlsd_${_RAY_JOB_TAG}}"
@@ -94,16 +92,7 @@ DATASET_CACHE_DIR="${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${BASE_DIR}/outputs/${RUN_CONFIG}}"
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/job_${JOB_TAG}}"
-# Per-step rollout snap dumps to ${OUTPUT_DIR}/rollouts/{step}.jsonl (8 samples by default).
-ENABLE_ROLLOUT_DUMP="${ENABLE_ROLLOUT_DUMP:-true}"
-export ENABLE_ROLLOUT_DUMP
-ROLLOUT_DATA_DIR="${ROLLOUT_DATA_DIR:-${OUTPUT_DIR}/rollouts}"
-ROLLOUT_DUMP_MAX_SAMPLES="${ROLLOUT_DUMP_MAX_SAMPLES:-8}"
-export ROLLOUT_DUMP_MAX_SAMPLES
 mkdir -p "${OUTPUT_DIR}" "${DATASET_CACHE_DIR}"
-if [ "${ENABLE_ROLLOUT_DUMP}" = "true" ]; then
-    mkdir -p "${ROLLOUT_DATA_DIR}"
-fi
 
 DISABLE_WANDB="${DISABLE_WANDB:-false}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
@@ -122,7 +111,6 @@ MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-3072}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 MAX_LENGTH="$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))"
 MAX_TEACHER_PROMPT_LENGTH="${MAX_TEACHER_PROMPT_LENGTH:-512}"
-TEACHER_SHAPING_LENGTH_CAP="${TEACHER_SHAPING_LENGTH_CAP:-512}"
 
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.9}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
@@ -143,7 +131,7 @@ export RLSD_MERGE_LORA_FOR_ASYNC_VLLM="${RLSD_MERGE_LORA_FOR_ASYNC_VLLM:-false}"
 DAPO_EPSILON="${DAPO_EPSILON:-0.2}"
 DAPO_EPSILON_HIGH="${DAPO_EPSILON_HIGH:-0.28}"
 KL_LOSS_COEF="${KL_LOSS_COEF:-0.0}"
-POSITIVE_ADV_LENGTH_CAP="${POSITIVE_ADV_LENGTH_CAP:-0}"
+POSITIVE_ADV_LENGTH_CAP="${POSITIVE_ADV_LENGTH_CAP:-2048}"
 LENGTH_PENALTY_START="${LENGTH_PENALTY_START:-0}"
 LENGTH_PENALTY="${LENGTH_PENALTY:-0.0}"
 TOKEN_RATIO_DEADBAND_LOW="${TOKEN_RATIO_DEADBAND_LOW:-0.95}"
@@ -158,20 +146,13 @@ export REWARD_MULTI_BOXED_PENALTY="${REWARD_MULTI_BOXED_PENALTY:-0.15}"
 export REWARD_MIN_CONSECUTIVE_BOXED="${REWARD_MIN_CONSECUTIVE_BOXED:-2}"
 export REWARD_BOXED_LAST_TOKEN_FRACTION="${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}"
 export DISABLE_THINKING_IN_CHAT_TEMPLATE="${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}"
-STRIP_DAPO_PROMPT_BOILERPLATE="${STRIP_DAPO_PROMPT_BOILERPLATE:-true}"
-export STRIP_DAPO_PROMPT_BOILERPLATE
-MATH_PROMPT_PREFIX="${MATH_PROMPT_PREFIX:-}"
-export MATH_PROMPT_PREFIX
-STRIP_EMPTY_THINKING_GENERATION_PROMPT="${STRIP_EMPTY_THINKING_GENERATION_PROMPT:-true}"
-export STRIP_EMPTY_THINKING_GENERATION_PROMPT
 
-export RLSD_TEACHER_EMA_ENABLED="${TEACHER_EMA_ENABLED}"
-export RLSD_TEACHER_EMA_LORA_NAME="${TEACHER_EMA_LORA_NAME}"
-export RLSD_TEACHER_EMA_LORA_RANK="${LORA_R}"
-export RLSD_TEACHER_EMA_ADAPTER_PATH="${OUTPUT_DIR}/teacher_ema_adapter"
-export RLSD_TEACHER_EMA_DECAY="${TEACHER_EMA_DECAY}"
 export RLSD_INTERNAL_TEACHER_LOGPROB="${INTERNAL_TEACHER_LOGPROB}"
 export RLSD_INTERNAL_TEACHER_STRICT="${INTERNAL_TEACHER_STRICT}"
+export RLSD_INTERNAL_TEACHER_SNAPSHOT_MODE="${INTERNAL_TEACHER_SNAPSHOT_MODE}"
+export RLSD_INTERNAL_TEACHER_START_STEP="${INTERNAL_TEACHER_START_STEP}"
+export RLSD_INTERNAL_TEACHER_BASE_UNTIL_STEP="${INTERNAL_TEACHER_BASE_UNTIL_STEP}"
+export RLSD_INTERNAL_TEACHER_SNAPSHOT_INTERVAL="${INTERNAL_TEACHER_SNAPSHOT_INTERVAL}"
 
 LOGGER="${LOGGER:-['console','wandb']}"
 if [ "${DISABLE_WANDB}" = "true" ]; then
@@ -191,12 +172,7 @@ VERL_ARGS=(
     "++algorithm.rlsd.teacher_prompt_mode=${TEACHER_PROMPT_MODE}"
     "++algorithm.rlsd.official_teacher_prompt=${OFFICIAL_TEACHER_PROMPT}"
     "++algorithm.rlsd.max_teacher_prompt_length=${MAX_TEACHER_PROMPT_LENGTH}"
-    "++algorithm.rlsd.teacher_shaping_length_cap=${TEACHER_SHAPING_LENGTH_CAP}"
-    "++algorithm.rlsd.teacher_ema_enabled=${TEACHER_EMA_ENABLED}"
-    "++algorithm.rlsd.teacher_ema_decay=${TEACHER_EMA_DECAY}"
-    "++algorithm.rlsd.teacher_ema_update_interval_steps=${TEACHER_EMA_UPDATE_INTERVAL_STEPS}"
-    "++algorithm.rlsd.teacher_ema_lora_name=${TEACHER_EMA_LORA_NAME}"
-    "++algorithm.rlsd.teacher_ema_adapter_dir=teacher_ema_adapter"
+    "++algorithm.rlsd.teacher_ema_enabled=false"
     "++algorithm.rlsd.wrong_boost=true"
     "++algorithm.rlsd.positive_adv_length_cap=${POSITIVE_ADV_LENGTH_CAP}"
     "++algorithm.rlsd.length_penalty_start=${LENGTH_PENALTY_START}"
@@ -213,8 +189,6 @@ VERL_ARGS=(
     "++algorithm.rlsd.adv_clip_high=${ADV_CLIP_HIGH}"
     "data.train_files=${DATASET_PATH}"
     "data.val_files=${VAL_DATASET_PATH}"
-    "++data.custom_cls.path=${SCRIPT_DIR}/verl_rlsd/dataset.py"
-    "++data.custom_cls.name=RLSDRLHFDataset"
     "data.train_batch_size=${TRAIN_BATCH_SIZE}"
     "data.max_prompt_length=${MAX_PROMPT_LENGTH}"
     "data.max_response_length=${MAX_COMPLETION_LENGTH}"
@@ -297,10 +271,6 @@ VERL_ARGS=(
     "trainer.logger=${LOGGER}"
     "trainer.resume_mode=disable"
 )
-
-if [ "${ENABLE_ROLLOUT_DUMP}" = "true" ]; then
-    VERL_ARGS+=("trainer.rollout_data_dir=${ROLLOUT_DATA_DIR}")
-fi
 
 if [ -n "${VERL_EXTRA_ARGS:-}" ]; then
     # shellcheck disable=SC2206
