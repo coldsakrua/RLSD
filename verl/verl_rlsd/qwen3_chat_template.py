@@ -25,7 +25,7 @@ _JINJA_EMPTY_THINKING_BLOCK = re.compile(
 
 
 def strip_empty_thinking_enabled() -> bool:
-    return os.environ.get("STRIP_EMPTY_THINKING_GENERATION_PROMPT", "true").strip().lower() in {
+    return os.environ.get("STRIP_EMPTY_THINKING_GENERATION_PROMPT", "false").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -62,7 +62,9 @@ def strip_empty_thinking_generation_prompt(text: str) -> str:
 
 
 def qwen3_chat_template_without_empty_thinking_block(base_template: str) -> str:
-    return _JINJA_EMPTY_THINKING_BLOCK.sub("", base_template)
+    # Qwen3 uses the empty <think></think> block as the official no-thinking
+    # generation marker when enable_thinking=False. Keep it in the template.
+    return base_template
 
 
 def load_qwen3_chat_template_without_empty_thinking(model_path: str) -> str:
@@ -75,7 +77,7 @@ def load_qwen3_chat_template_without_empty_thinking(model_path: str) -> str:
 
 
 def install_qwen3_no_think_chat_template(tokenizer: Any) -> None:
-    """Replace Qwen3 chat template with the no-think variant (enable_thinking=false)."""
+    """Restore the official Qwen3 template; enable_thinking=False selects no-think."""
     if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
         return
     model_path = getattr(tokenizer, "name_or_path", None)

@@ -84,7 +84,7 @@ _APPLY_CHAT_NO_THINK_NEW = """    def _apply_chat_no_think(messages, *args, **kw
             out = _orig_apply_chat(messages, *args, **kw)
         if (
             isinstance(out, str)
-            and _rlsd_os.environ.get("STRIP_EMPTY_THINKING_GENERATION_PROMPT", "true").strip().lower()
+            and _rlsd_os.environ.get("STRIP_EMPTY_THINKING_GENERATION_PROMPT", "false").strip().lower()
             in {"1", "true", "yes", "on"}
             and kw.get("add_generation_prompt", True)
         ):
@@ -486,7 +486,7 @@ def _rlsd_wrap_disable_thinking(tokenizer):
             out = _orig_apply_chat(messages, *args, **kw)
         if (
             isinstance(out, str)
-            and _rlsd_os.environ.get("STRIP_EMPTY_THINKING_GENERATION_PROMPT", "true").strip().lower()
+            and _rlsd_os.environ.get("STRIP_EMPTY_THINKING_GENERATION_PROMPT", "false").strip().lower()
             in {"1", "true", "yes", "on"}
             and kw.get("add_generation_prompt", True)
         ):
@@ -615,7 +615,7 @@ def _patch_vllm_openai_chat_template_on_disk() -> None:
     insert = (
         "        # build serving chat\n"
         "        _rlsd_chat_template = None\n"
-        "        if os.environ.get(\"STRIP_EMPTY_THINKING_GENERATION_PROMPT\", \"true\").strip().lower() in {\n"
+        "        if os.environ.get(\"STRIP_EMPTY_THINKING_GENERATION_PROMPT\", \"false\").strip().lower() in {\n"
         "            \"1\", \"true\", \"yes\", \"on\",\n"
         "        }:\n"
         "            try:\n"
