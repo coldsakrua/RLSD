@@ -25,6 +25,7 @@ CUSTOM_ADV_ESTIMATORS = {
     "rlsd_grpo",
     "rlsd_strict_split_flip",
     "rlsd_strict_split_flip_wrong_boost",
+    "rlsd_strict_split_preserve_sign",
     "rlrt",
     "opd_zero",
 }
@@ -252,6 +253,15 @@ def _safe_exp_gap(x: torch.Tensor) -> torch.Tensor:
     return torch.exp(torch.clamp(x, min=-20.0, max=20.0))
 
 
+def _zero_crossed_advantages(
+    shaped_adv: torch.Tensor,
+    base_adv: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    crossed = ((base_adv > 0) & (shaped_adv < 0)) | ((base_adv < 0) & (shaped_adv > 0))
+    return torch.where(crossed, torch.zeros_like(shaped_adv), shaped_adv) * mask.float()
+
+
 @register_adv_est("opd_zero")
 def opd_zero_advantage(
     token_level_rewards: torch.Tensor,
@@ -300,6 +310,7 @@ def _strict_split_common(
     config: Any,
     wrong_boost: bool,
     kwargs: dict[str, Any],
+    preserve_sign: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     mask = response_mask.float()
     norm = bool(_cfg_get(config, "algorithm.norm_adv_by_std_in_grpo", True))
@@ -354,29 +365,30 @@ def _strict_split_common(
         weight = torch.minimum(torch.maximum(weight, low), high)
         shaped = base_adv * torch.clamp(1.0 + lam * (weight - 1.0) * mask, min=0.0)
 
-        down_flip = (base_adv > 0) & (g < 0) & mask.bool()
-        down_weight = torch.clamp(
-            _safe_exp_gap(-g),
-            min=max(1.0, wrong_low),
-            max=wrong_high,
-        )
-        shaped = torch.where(
-            down_flip,
-            -base_adv.abs() * torch.clamp(1.0 + lam * (down_weight - 1.0), min=0.0),
-            shaped,
-        )
-        if wrong_boost:
-            up_flip = (base_adv < 0) & (g > 0) & mask.bool()
-            up_weight = torch.clamp(
-                _safe_exp_gap(g),
-                min=max(1.0, correct_low),
-                max=correct_high,
+        if not preserve_sign:
+            down_flip = (base_adv > 0) & (g < 0) & mask.bool()
+            down_weight = torch.clamp(
+                _safe_exp_gap(-g),
+                min=max(1.0, wrong_low),
+                max=wrong_high,
             )
             shaped = torch.where(
-                up_flip,
-                base_adv.abs() * torch.clamp(1.0 + lam * (up_weight - 1.0), min=0.0),
+                down_flip,
+                -base_adv.abs() * torch.clamp(1.0 + lam * (down_weight - 1.0), min=0.0),
                 shaped,
             )
+            if wrong_boost:
+                up_flip = (base_adv < 0) & (g > 0) & mask.bool()
+                up_weight = torch.clamp(
+                    _safe_exp_gap(g),
+                    min=max(1.0, correct_low),
+                    max=correct_high,
+                )
+                shaped = torch.where(
+                    up_flip,
+                    base_adv.abs() * torch.clamp(1.0 + lam * (up_weight - 1.0), min=0.0),
+                    shaped,
+                )
         return shaped * mask
 
     def apply_teacher_shaping(base_adv: torch.Tensor) -> torch.Tensor:
@@ -393,6 +405,11 @@ def _strict_split_common(
         * fallback_scale
         * mask
     )
+
+    base_token_adv = torch.zeros_like(mask)
+    base_token_adv = torch.where(all_correct, all_correct_base, base_token_adv)
+    base_token_adv = torch.where(all_wrong, all_wrong_base, base_token_adv)
+    base_token_adv = torch.where(mixed, mixed_base, base_token_adv)
 
     token_adv = torch.zeros_like(mask)
     token_adv = torch.where(all_correct, apply_teacher_shaping(all_correct_base), token_adv)
@@ -417,6 +434,8 @@ def _strict_split_common(
         token_adv = token_adv - length_penalty * past_penalty_start.float()
 
     token_adv = torch.clamp(token_adv, min=adv_low, max=adv_high) * mask
+    if preserve_sign:
+        token_adv = _zero_crossed_advantages(token_adv, base_token_adv, mask)
     return token_adv, token_adv
 
 
@@ -452,6 +471,25 @@ def rlsd_strict_split_flip_wrong_boost_advantage(
         index=index,
         config=config,
         wrong_boost=True,
+        kwargs=kwargs,
+    )
+
+
+@register_adv_est("rlsd_strict_split_preserve_sign")
+def rlsd_strict_split_preserve_sign_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: Any = None,
+    config: Any = None,
+    **kwargs: Any,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _strict_split_common(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        config=config,
+        wrong_boost=False,
+        preserve_sign=True,
         kwargs=kwargs,
     )
 
