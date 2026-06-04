@@ -17,17 +17,13 @@ MODEL_PATH="${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/
 export MODEL_PATH
 LEARNING_RATE="${LEARNING_RATE:-1e-6}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
-WARMUP_RATIO="${WARMUP_RATIO:-0.05}"
-WARMUP_STEPS="${WARMUP_STEPS:-0}"
-LR_END="${LR_END:-1e-7}"
-LR_SCHEDULER_TYPE="${LR_SCHEDULER_TYPE:-polynomial}"
 
 NUM_GENERATIONS="${NUM_GENERATIONS:-8}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
 TOP_P="${TOP_P:-0.95}"
 TOP_K="${TOP_K:-20}"
 MIN_P="${MIN_P:-0.0}"
-PRESENCE_PENALTY="${PRESENCE_PENALTY:-0.2}"
+PRESENCE_PENALTY="${PRESENCE_PENALTY:-0.0}"
 MASK_TRUNCATED_COMPLETIONS="${MASK_TRUNCATED_COMPLETIONS:-true}"
 
 # Same batch policy as the 8-answer RLSD/RLRT scripts:
@@ -92,25 +88,17 @@ MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-3072}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 MAX_LENGTH="$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))"
 
-if [ "${WARMUP_STEPS}" != "0" ]; then
-    LR_WARMUP_STEPS="${WARMUP_STEPS}"
-    LR_WARMUP_RATIO="0.0"
-else
-    LR_WARMUP_STEPS="-1"
-    LR_WARMUP_RATIO="${WARMUP_RATIO:-0.0}"
-fi
-MIN_LR_RATIO="${MIN_LR_RATIO:-$(awk -v end="${LR_END}" -v lr="${LEARNING_RATE}" 'BEGIN { if (lr > 0) printf "%.8f", end / lr; else print "0.0" }')}"
-
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.9}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
+LAYERED_SUMMON="${LAYERED_SUMMON:-False}"
 ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-2}"
 AGENT_LOOP_WORKERS="${AGENT_LOOP_WORKERS:-8}"
 
 LORA_R="${LORA_R:-64}"
 LORA_ALPHA="${LORA_ALPHA:-128}"
 LORA_TARGET_MODULES="${LORA_TARGET_MODULES:-[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]}"
-export RLSD_MERGE_LORA_FOR_ASYNC_VLLM="${RLSD_MERGE_LORA_FOR_ASYNC_VLLM:-true}"
+export RLSD_MERGE_LORA_FOR_ASYNC_VLLM="${RLSD_MERGE_LORA_FOR_ASYNC_VLLM:-false}"
 
 DAPO_EPSILON="${DAPO_EPSILON:-0.2}"
 DAPO_EPSILON_HIGH="${DAPO_EPSILON_HIGH:-0.28}"
@@ -123,11 +111,17 @@ MATH_INSTRUCTION_SUFFIX="${MATH_INSTRUCTION_SUFFIX:-}"
 USE_DAPO_RAW_PROMPT="${USE_DAPO_RAW_PROMPT:-true}"
 
 export REWARD_FORMAT_PENALTIES="${REWARD_FORMAT_PENALTIES:-false}"
-export REWARD_NO_EOS_PENALTY="${REWARD_NO_EOS_PENALTY:-0.0}"
+export REWARD_NO_EOS_PENALTY="${REWARD_NO_EOS_PENALTY:-0.15}"
 export REWARD_MULTI_BOXED_PENALTY="${REWARD_MULTI_BOXED_PENALTY:-0.15}"
 export REWARD_MIN_CONSECUTIVE_BOXED="${REWARD_MIN_CONSECUTIVE_BOXED:-2}"
 export REWARD_BOXED_LAST_TOKEN_FRACTION="${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}"
 export DISABLE_THINKING_IN_CHAT_TEMPLATE="${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}"
+STRIP_DAPO_PROMPT_BOILERPLATE="${STRIP_DAPO_PROMPT_BOILERPLATE:-true}"
+export STRIP_DAPO_PROMPT_BOILERPLATE
+MATH_PROMPT_PREFIX="${MATH_PROMPT_PREFIX:-}"
+export MATH_PROMPT_PREFIX
+STRIP_EMPTY_THINKING_GENERATION_PROMPT="${STRIP_EMPTY_THINKING_GENERATION_PROMPT:-false}"
+export STRIP_EMPTY_THINKING_GENERATION_PROMPT
 
 LOGGER="${LOGGER:-['console','wandb']}"
 if [ "${DISABLE_WANDB}" = "true" ]; then
@@ -147,6 +141,8 @@ VERL_ARGS=(
     "++algorithm.rlsd.mask_truncated_completions=${MASK_TRUNCATED_COMPLETIONS}"
     "data.train_files=${DATASET_PATH}"
     "data.val_files=${VAL_DATASET_PATH}"
+    "++data.custom_cls.path=${SCRIPT_DIR}/verl_rlsd/dataset.py"
+    "++data.custom_cls.name=RLSDRLHFDataset"
     "data.train_batch_size=${TRAIN_BATCH_SIZE}"
     "data.max_prompt_length=${MAX_PROMPT_LENGTH}"
     "data.max_response_length=${MAX_COMPLETION_LENGTH}"
@@ -164,10 +160,6 @@ VERL_ARGS=(
     "++actor_rollout_ref.model.lora.merge=${RLSD_MERGE_LORA_FOR_ASYNC_VLLM}"
     "actor_rollout_ref.actor.optim.lr=${LEARNING_RATE}"
     "actor_rollout_ref.actor.optim.weight_decay=${WEIGHT_DECAY}"
-    "actor_rollout_ref.actor.optim.lr_warmup_steps=${LR_WARMUP_STEPS}"
-    "actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=${LR_WARMUP_RATIO}"
-    "actor_rollout_ref.actor.optim.lr_scheduler_type=${LR_SCHEDULER_TYPE}"
-    "actor_rollout_ref.actor.optim.min_lr_ratio=${MIN_LR_RATIO}"
     "actor_rollout_ref.actor.grad_clip=1.0"
     "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}"
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU}"
@@ -183,6 +175,8 @@ VERL_ARGS=(
     "actor_rollout_ref.rollout.name=vllm"
     "actor_rollout_ref.rollout.mode=async"
     "actor_rollout_ref.rollout.dtype=bfloat16"
+    "actor_rollout_ref.rollout.load_format=safetensors"
+    "actor_rollout_ref.rollout.layered_summon=${LAYERED_SUMMON}"
     "actor_rollout_ref.rollout.n=${NUM_GENERATIONS}"
     "actor_rollout_ref.rollout.temperature=${TEMPERATURE}"
     "actor_rollout_ref.rollout.top_p=${TOP_P}"
@@ -192,6 +186,9 @@ VERL_ARGS=(
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}"
     "actor_rollout_ref.rollout.max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
     "actor_rollout_ref.rollout.max_model_len=${MAX_LENGTH}"
+    "++actor_rollout_ref.rollout.engine_kwargs.vllm.enable_lora=true"
+    "++actor_rollout_ref.rollout.engine_kwargs.vllm.max_loras=2"
+    "++actor_rollout_ref.rollout.engine_kwargs.vllm.max_lora_rank=${LORA_R}"
     "++actor_rollout_ref.rollout.multi_turn.sampling_params.n=${NUM_GENERATIONS}"
     "++actor_rollout_ref.rollout.multi_turn.sampling_params.temperature=${TEMPERATURE}"
     "++actor_rollout_ref.rollout.multi_turn.sampling_params.top_p=${TOP_P}"

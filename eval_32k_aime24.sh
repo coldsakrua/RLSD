@@ -29,11 +29,11 @@ export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
 
 # Thinking mode ON by default
-NO_THINKING=${NO_THINKING:-0}
+NO_THINKING=${NO_THINKING:-1}
 datasets_csv=${DATASETS:-aime24,aime26}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/grpo_4b_strict/job_1716796/checkpoint-300}}
+checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/cast_ema_len_safe_4b/job_2114330/global_step_300/actor/lora_adapter}}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
 use_lora=${USE_LORA:-1}
 num_samples=${NUM_SAMPLES:-0}
