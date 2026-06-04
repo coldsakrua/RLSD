@@ -1,20 +1,46 @@
 #!/bin/bash
-#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/grpo_4b.%j.out
+#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/cast_ema_4b_256.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
+#SBATCH --exclude=gpua800n07,gpua800n09
 
 set -eo pipefail
 
-# GRPO strict baseline: no teacher token shaping, no distillation.
-RUN_CONFIG="${RUN_CONFIG:-grpo_4b}"
+# Strict-split sign-flip RLSD plus wrong-path positive boost with an EMA teacher.
+# Teacher uses the exact same prompt tokens as the student, while teacher
+# weights follow an EMA of student LoRA so token gaps stay non-zero.
+#
+# Defaults are length-safe: GRPO assigns A to every token, teacher RLSD shaping
+# applies only to the first TEACHER_SHAPING_LENGTH_CAP response tokens; tail keeps GRPO A.
+RUN_CONFIG="${RUN_CONFIG:-cast_ema_4b_256}"
+ADV_ESTIMATOR="${ADV_ESTIMATOR:-rlsd_strict_split_flip_wrong_boost}"
 REWARD_FUNCTION_NAME="${REWARD_FUNCTION_NAME:-compute_score}"
+TOKEN_GAP_LAMBDA="${TOKEN_GAP_LAMBDA:-0.5}"
+TOKEN_GAP_DECAY_STEPS="${TOKEN_GAP_DECAY_STEPS:-300}"
+TEACHER_PROMPT_MODE="${TEACHER_PROMPT_MODE:-identical_student}"
+OFFICIAL_TEACHER_PROMPT="${OFFICIAL_TEACHER_PROMPT:-false}"
+DISTILLATION_LOSS_COEF="${DISTILLATION_LOSS_COEF:-0.0}"
 
-MODEL_PATH="${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}"
-export MODEL_PATH
+TEACHER_EMA_ENABLED="${TEACHER_EMA_ENABLED:-true}"
+TEACHER_EMA_DECAY="${TEACHER_EMA_DECAY:-0.995}"
+TEACHER_EMA_UPDATE_INTERVAL_STEPS="${TEACHER_EMA_UPDATE_INTERVAL_STEPS:-1}"
+TEACHER_EMA_LORA_NAME="${TEACHER_EMA_LORA_NAME:-teacher_ema}"
+INTERNAL_TEACHER_LOGPROB="${INTERNAL_TEACHER_LOGPROB:-true}"
+INTERNAL_TEACHER_STRICT="${INTERNAL_TEACHER_STRICT:-true}"
+
+ALL_CORRECT_BASE_ADVANTAGE="${ALL_CORRECT_BASE_ADVANTAGE:-1.0}"
+ALL_WRONG_BASE_ADVANTAGE="${ALL_WRONG_BASE_ADVANTAGE:--1.0}"
+CORRECT_WEIGHT_CLIP_LOW="${CORRECT_WEIGHT_CLIP_LOW:-0.8}"
+CORRECT_WEIGHT_CLIP_HIGH="${CORRECT_WEIGHT_CLIP_HIGH:-1.05}"
+WRONG_WEIGHT_CLIP_LOW="${WRONG_WEIGHT_CLIP_LOW:-0.95}"
+WRONG_WEIGHT_CLIP_HIGH="${WRONG_WEIGHT_CLIP_HIGH:-1.2}"
+ADV_CLIP_LOW="${ADV_CLIP_LOW:--1.2}"
+ADV_CLIP_HIGH="${ADV_CLIP_HIGH:-1.2}"
+
 LEARNING_RATE="${LEARNING_RATE:-1e-6}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
 
@@ -25,8 +51,6 @@ TOP_K="${TOP_K:-20}"
 MIN_P="${MIN_P:-0.0}"
 PRESENCE_PENALTY="${PRESENCE_PENALTY:-0.0}"
 
-# Same batch policy as the 8-answer RLSD/RLRT scripts:
-# 4 prompts * 8 rollouts = 32 responses per veRL train batch.
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-4}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}"
@@ -62,13 +86,24 @@ export TMPDIR="${TMPDIR:-/tmp/rlsd_${_RAY_JOB_TAG}}"
 mkdir -p "${RAY_TMPDIR}" "${TMPDIR}"
 unset ROCR_VISIBLE_DEVICES
 
+MODEL_PATH="${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}"
+export MODEL_PATH
 DATASET_PATH="${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}"
 VAL_DATASET_PATH="${VAL_DATASET_PATH:-${DATASET_PATH}}"
 DATASET_CACHE_DIR="${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${BASE_DIR}/outputs/${RUN_CONFIG}}"
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/job_${JOB_TAG}}"
+# Per-step rollout snap dumps to ${OUTPUT_DIR}/rollouts/{step}.jsonl (8 samples by default).
+ENABLE_ROLLOUT_DUMP="${ENABLE_ROLLOUT_DUMP:-false}"
+export ENABLE_ROLLOUT_DUMP
+ROLLOUT_DATA_DIR="${ROLLOUT_DATA_DIR:-${OUTPUT_DIR}/rollouts}"
+ROLLOUT_DUMP_MAX_SAMPLES="${ROLLOUT_DUMP_MAX_SAMPLES:-8}"
+export ROLLOUT_DUMP_MAX_SAMPLES
 mkdir -p "${OUTPUT_DIR}" "${DATASET_CACHE_DIR}"
+if [ "${ENABLE_ROLLOUT_DUMP}" = "true" ]; then
+    mkdir -p "${ROLLOUT_DATA_DIR}"
+fi
 
 DISABLE_WANDB="${DISABLE_WANDB:-false}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
@@ -86,12 +121,17 @@ SAVE_STEPS="${SAVE_STEPS:-50}"
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-3072}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 MAX_LENGTH="$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))"
+TEACHER_SHAPING_LENGTH_CAP="${TEACHER_SHAPING_LENGTH_CAP:-256}"
 
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.9}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 LAYERED_SUMMON="${LAYERED_SUMMON:-False}"
 ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-2}"
+DISTILLATION_ENABLED="${DISTILLATION_ENABLED:-false}"
+TEACHER_GPUS_PER_NODE="${TEACHER_GPUS_PER_NODE:-0}"
+TEACHER_TP_SIZE="${TEACHER_TP_SIZE:-1}"
+TEACHER_GPU_MEM_UTIL="${TEACHER_GPU_MEM_UTIL:-0.5}"
 AGENT_LOOP_WORKERS="${AGENT_LOOP_WORKERS:-8}"
 
 LORA_R="${LORA_R:-64}"
@@ -102,6 +142,14 @@ export RLSD_MERGE_LORA_FOR_ASYNC_VLLM="${RLSD_MERGE_LORA_FOR_ASYNC_VLLM:-false}"
 DAPO_EPSILON="${DAPO_EPSILON:-0.2}"
 DAPO_EPSILON_HIGH="${DAPO_EPSILON_HIGH:-0.28}"
 KL_LOSS_COEF="${KL_LOSS_COEF:-0.0}"
+POSITIVE_ADV_LENGTH_CAP="${POSITIVE_ADV_LENGTH_CAP:-0}"
+LENGTH_PENALTY_START="${LENGTH_PENALTY_START:-0}"
+LENGTH_PENALTY="${LENGTH_PENALTY:-0.0}"
+# TOKEN_RATIO_DEADBAND_LOW="${TOKEN_RATIO_DEADBAND_LOW:-0.95}"
+# TOKEN_RATIO_DEADBAND_HIGH="${TOKEN_RATIO_DEADBAND_HIGH:-1.05}"
+DISTILLATION_TOPK="${DISTILLATION_TOPK:-32}"
+DISTILLATION_USE_TASK_REWARDS="${DISTILLATION_USE_TASK_REWARDS:-true}"
+USE_POLICY_GRAD_DISTILL="${USE_POLICY_GRAD_DISTILL:-false}"
 REWARD_BINARY_THRESHOLD="${REWARD_BINARY_THRESHOLD:-0.5}"
 export REWARD_FORMAT_PENALTIES="${REWARD_FORMAT_PENALTIES:-false}"
 export REWARD_NO_EOS_PENALTY="${REWARD_NO_EOS_PENALTY:-0.15}"
@@ -116,6 +164,14 @@ export MATH_PROMPT_PREFIX
 STRIP_EMPTY_THINKING_GENERATION_PROMPT="${STRIP_EMPTY_THINKING_GENERATION_PROMPT:-false}"
 export STRIP_EMPTY_THINKING_GENERATION_PROMPT
 
+export RLSD_TEACHER_EMA_ENABLED="${TEACHER_EMA_ENABLED}"
+export RLSD_TEACHER_EMA_LORA_NAME="${TEACHER_EMA_LORA_NAME}"
+export RLSD_TEACHER_EMA_LORA_RANK="${LORA_R}"
+export RLSD_TEACHER_EMA_ADAPTER_PATH="${OUTPUT_DIR}/teacher_ema_adapter"
+export RLSD_TEACHER_EMA_DECAY="${TEACHER_EMA_DECAY}"
+export RLSD_INTERNAL_TEACHER_LOGPROB="${INTERNAL_TEACHER_LOGPROB}"
+export RLSD_INTERNAL_TEACHER_STRICT="${INTERNAL_TEACHER_STRICT}"
+
 LOGGER="${LOGGER:-['console','wandb']}"
 if [ "${DISABLE_WANDB}" = "true" ]; then
     LOGGER="['console']"
@@ -123,9 +179,37 @@ fi
 
 VERL_ARGS=(
     "algorithm.adv_estimator=grpo"
+    "++algorithm.rlsd.custom_adv_estimator=${ADV_ESTIMATOR}"
     "algorithm.use_kl_in_reward=false"
     "algorithm.norm_adv_by_std_in_grpo=true"
+    "++algorithm.rlsd.token_gap_lambda=${TOKEN_GAP_LAMBDA}"
+    "++algorithm.rlsd.lmbda=${TOKEN_GAP_LAMBDA}"
+    "++algorithm.rlsd.token_gap_decay_steps=${TOKEN_GAP_DECAY_STEPS}"
+    "++algorithm.rlsd.lmbda_decay_steps=${TOKEN_GAP_DECAY_STEPS}"
     "++algorithm.rlsd.reward_binary_threshold=${REWARD_BINARY_THRESHOLD}"
+    "++algorithm.rlsd.teacher_prompt_mode=${TEACHER_PROMPT_MODE}"
+    "++algorithm.rlsd.official_teacher_prompt=${OFFICIAL_TEACHER_PROMPT}"
+    "++algorithm.rlsd.max_teacher_prompt_length=${MAX_PROMPT_LENGTH}"
+    "++algorithm.rlsd.teacher_shaping_length_cap=${TEACHER_SHAPING_LENGTH_CAP}"
+    "++algorithm.rlsd.teacher_ema_enabled=${TEACHER_EMA_ENABLED}"
+    "++algorithm.rlsd.teacher_ema_decay=${TEACHER_EMA_DECAY}"
+    "++algorithm.rlsd.teacher_ema_update_interval_steps=${TEACHER_EMA_UPDATE_INTERVAL_STEPS}"
+    "++algorithm.rlsd.teacher_ema_lora_name=${TEACHER_EMA_LORA_NAME}"
+    "++algorithm.rlsd.teacher_ema_adapter_dir=teacher_ema_adapter"
+    "++algorithm.rlsd.wrong_boost=true"
+    "++algorithm.rlsd.positive_adv_length_cap=${POSITIVE_ADV_LENGTH_CAP}"
+    "++algorithm.rlsd.length_penalty_start=${LENGTH_PENALTY_START}"
+    "++algorithm.rlsd.length_penalty=${LENGTH_PENALTY}"
+    # "++algorithm.rlsd.token_ratio_deadband_low=${TOKEN_RATIO_DEADBAND_LOW}"
+    # "++algorithm.rlsd.token_ratio_deadband_high=${TOKEN_RATIO_DEADBAND_HIGH}"
+    "++algorithm.rlsd.all_correct_base_advantage=${ALL_CORRECT_BASE_ADVANTAGE}"
+    "++algorithm.rlsd.all_wrong_base_advantage=${ALL_WRONG_BASE_ADVANTAGE}"
+    "++algorithm.rlsd.correct_weight_clip_low=${CORRECT_WEIGHT_CLIP_LOW}"
+    "++algorithm.rlsd.correct_weight_clip_high=${CORRECT_WEIGHT_CLIP_HIGH}"
+    "++algorithm.rlsd.wrong_weight_clip_low=${WRONG_WEIGHT_CLIP_LOW}"
+    "++algorithm.rlsd.wrong_weight_clip_high=${WRONG_WEIGHT_CLIP_HIGH}"
+    "++algorithm.rlsd.adv_clip_low=${ADV_CLIP_LOW}"
+    "++algorithm.rlsd.adv_clip_high=${ADV_CLIP_HIGH}"
     "data.train_files=${DATASET_PATH}"
     "data.val_files=${VAL_DATASET_PATH}"
     "++data.custom_cls.path=${SCRIPT_DIR}/verl_rlsd/dataset.py"
@@ -183,6 +267,23 @@ VERL_ARGS=(
     "++actor_rollout_ref.rollout.multi_turn.sampling_params.min_p=${MIN_P}"
     "++actor_rollout_ref.rollout.multi_turn.sampling_params.presence_penalty=${PRESENCE_PENALTY}"
     "++actor_rollout_ref.rollout.agent.num_workers=${AGENT_LOOP_WORKERS}"
+    "++actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_rlsd.teacher_agent.RLSDTeacherAgentLoopManager"
+    "++distillation.enabled=${DISTILLATION_ENABLED}"
+    "++distillation.nnodes=1"
+    "++distillation.n_gpus_per_node=${TEACHER_GPUS_PER_NODE}"
+    "++distillation.distillation_loss.topk=${DISTILLATION_TOPK}"
+    "++distillation.distillation_loss.use_task_rewards=${DISTILLATION_USE_TASK_REWARDS}"
+    "++distillation.distillation_loss.distillation_loss_coef=${DISTILLATION_LOSS_COEF}"
+    "++distillation.distillation_loss.use_policy_gradient=${USE_POLICY_GRAD_DISTILL}"
+    "++distillation.teacher_models.teacher_model.model_path=${MODEL_PATH}"
+    "++distillation.teacher_models.teacher_model.num_replicas=1"
+    "++distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=${TEACHER_TP_SIZE}"
+    "++distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=${TEACHER_GPU_MEM_UTIL}"
+    "++distillation.teacher_models.teacher_model.inference.max_model_len=${MAX_LENGTH}"
+    "++distillation.teacher_models.teacher_model.inference.max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}"
+    "++distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm.enable_lora=true"
+    "++distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm.max_loras=1"
+    "++distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm.max_lora_rank=${LORA_R}"
     "trainer.nnodes=1"
     "trainer.n_gpus_per_node=${ACTOR_GPUS_PER_NODE}"
     "trainer.total_training_steps=${MAX_STEPS}"
@@ -195,6 +296,10 @@ VERL_ARGS=(
     "trainer.logger=${LOGGER}"
     "trainer.resume_mode=disable"
 )
+
+if [ "${ENABLE_ROLLOUT_DUMP}" = "true" ]; then
+    VERL_ARGS+=("trainer.rollout_data_dir=${ROLLOUT_DATA_DIR}")
+fi
 
 if [ -n "${VERL_EXTRA_ARGS:-}" ]; then
     # shellcheck disable=SC2206
