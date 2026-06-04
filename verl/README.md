@@ -70,8 +70,15 @@ Batch defaults:
   `NUM_GENERATIONS=8`, i.e. 32 generated responses per veRL train batch.
 - Official OPSD uses `TRAIN_BATCH_SIZE=8` and `NUM_GENERATIONS=1`.
 - All scripts default to `PPO_MINI_BATCH_SIZE=4` and
-  `PPO_MICRO_BATCH_SIZE_PER_GPU=2` for safer memory use with 3072-token
-  responses on a 2-GPU A800 node.
+  `PPO_MICRO_BATCH_SIZE_PER_GPU=2` for safer memory use on a 2-GPU A800 node.
+- RLSD/GRPO/RLRT-family veRL scripts follow the RLSD release/paper sampling
+  and length defaults (`TEMPERATURE=1.0`, `TOP_P=1.0`, no top-k cap via
+  `TOP_K=-1`, `MAX_PROMPT_LENGTH=4096`, `MAX_COMPLETION_LENGTH=4096`) while
+  keeping local card and batch settings unchanged.
+- Official OPSD follows the OPSD non-thinking 4B release defaults where they
+  are not resource/batch choices: `LEARNING_RATE=5e-6`,
+  `MAX_GRAD_NORM=0.1`, `SAVE_STEPS=25`, `MAX_COMPLETION_LENGTH=1024`,
+  `TEMPERATURE=1.1`, `TOP_P=0.95`, and `TOP_K=20`.
 
 Append raw veRL/Hydra overrides with `VERL_EXTRA_ARGS`, for example:
 
