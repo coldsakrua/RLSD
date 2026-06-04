@@ -108,7 +108,15 @@ def build_teacher_prompt(
     solution_text = "" if solution is None else str(solution)
     mode = (mode or "reference_solution").strip().lower()
 
-    if mode in {"official_opsd", "official", "reference_solution"}:
+    if mode in {
+        "official_opsd",
+        "official",
+        "reference_solution",
+        "student_reference_solution",
+        "student_with_reference_solution",
+        "with_gt",
+        "with_ground_truth",
+    }:
         template = teacher_prompt_template or DEFAULT_REF_TEACHER_PROMPT
         transition = teacher_transition_prompt or DEFAULT_TRANSITION_PROMPT
         try:
@@ -133,4 +141,3 @@ def build_teacher_prompt(
         return template.format(prompt=prompt_text, correct_rollout=correct_rollout)
 
     raise ValueError(f"Unsupported teacher prompt mode: {mode}")
-

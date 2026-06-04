@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib
 import functools
 import json
@@ -13,11 +14,14 @@ from urllib import request as urllib_request
 
 import torch
 
+from .prompt_utils import build_teacher_prompt, extract_solution
+
 logger = logging.getLogger(__name__)
 
 _CONTROLLER: TeacherEMAController | None = None
 _TRAINER_REF: weakref.ReferenceType[Any] | None = None
 _PATCHED = False
+_INTERNAL_TEACHER_TOKENIZER: Any = None
 
 
 def _env_truthy(name: str, default: bool = False) -> bool:
@@ -456,6 +460,264 @@ def _should_compute_internal_teacher_logprobs() -> bool:
     return _get_trainer_global_step() >= _internal_teacher_start_step()
 
 
+def _env_int(name: str, default: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _internal_teacher_prompt_mode() -> str:
+    return os.environ.get("RLSD_TEACHER_PROMPT_MODE", "").strip().lower()
+
+
+def _internal_teacher_uses_privileged_prompt() -> bool:
+    return _internal_teacher_prompt_mode() in {
+        "official_opsd",
+        "official",
+        "reference_solution",
+        "student_reference_solution",
+        "student_with_reference_solution",
+        "with_gt",
+        "with_ground_truth",
+    }
+
+
+def _internal_teacher_tokenizer() -> Any:
+    global _INTERNAL_TEACHER_TOKENIZER
+    if _INTERNAL_TEACHER_TOKENIZER is not None:
+        return _INTERNAL_TEACHER_TOKENIZER
+    model_path = os.environ.get("TOKENIZER_PATH") or os.environ.get("MODEL_PATH")
+    if not model_path:
+        return None
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    except Exception as exc:
+        logger.warning("Failed to load tokenizer for privileged internal teacher prompt: %s", exc)
+        return None
+    _INTERNAL_TEACHER_TOKENIZER = tokenizer
+    return tokenizer
+
+
+def _tokenizer_pad_id(tokenizer: Any) -> int:
+    pad_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_id is None:
+        pad_id = getattr(tokenizer, "eos_token_id", None)
+    return int(pad_id or 0)
+
+
+def _tokenize_text(tokenizer: Any, text: str) -> list[int]:
+    try:
+        ids = tokenizer.encode(text, add_special_tokens=False)
+    except Exception:
+        encoded = tokenizer(text, add_special_tokens=False)
+        ids = encoded.get("input_ids", [])
+    return [int(x) for x in ids]
+
+
+def _as_row_value(value: Any, index: int) -> Any:
+    if isinstance(value, torch.Tensor):
+        if value.ndim > 0 and value.shape[0] > index:
+            value = value[index]
+        if value.numel() == 1:
+            return value.item()
+        return value
+    if not isinstance(value, (str, bytes, Mapping)):
+        try:
+            if len(value) > index:
+                value = value[index]
+        except Exception:
+            pass
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except Exception:
+            pass
+    return value
+
+
+def _non_tensor_row(non_tensor_batch: Mapping[str, Any], index: int) -> dict[str, Any]:
+    return {str(key): _as_row_value(value, index) for key, value in non_tensor_batch.items()}
+
+
+def _clone_teacher_data(data: Any) -> tuple[Any, Any] | None:
+    batch = getattr(data, "batch", None)
+    if batch is None:
+        return None
+    teacher_data = copy.copy(data)
+    try:
+        teacher_batch = batch.clone()
+    except Exception:
+        try:
+            teacher_batch = batch.copy()
+        except Exception:
+            teacher_batch = dict(batch)
+    teacher_data.batch = teacher_batch
+    return teacher_data, teacher_batch
+
+
+def _batch_tensor(batch: Any, key: str) -> torch.Tensor | None:
+    value = _get_item(batch, key)
+    return value if isinstance(value, torch.Tensor) else None
+
+
+def _build_position_ids(attention_mask: torch.Tensor) -> torch.Tensor:
+    position_ids = torch.cumsum(attention_mask.long(), dim=-1) - 1
+    return position_ids.masked_fill(attention_mask <= 0, 0)
+
+
+def _pad_2d(
+    sequences: list[list[int]],
+    *,
+    width: int,
+    pad_id: int,
+    device: torch.device,
+    left_pad: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    out = torch.full((len(sequences), width), pad_id, dtype=torch.long, device=device)
+    mask = torch.zeros((len(sequences), width), dtype=torch.long, device=device)
+    for row, ids in enumerate(sequences):
+        ids = ids[-width:] if left_pad else ids[:width]
+        if not ids:
+            continue
+        start = width - len(ids) if left_pad else 0
+        values = torch.as_tensor(ids, dtype=torch.long, device=device)
+        out[row, start : start + len(ids)] = values
+        mask[row, start : start + len(ids)] = 1
+    return out, mask
+
+
+def _response_mask_from_batch(batch: Any, responses: torch.Tensor, pad_id: int) -> torch.Tensor:
+    response_mask = _batch_tensor(batch, "response_mask")
+    if response_mask is not None:
+        return response_mask.to(device=responses.device).long()
+    attention_mask = _batch_tensor(batch, "attention_mask")
+    if attention_mask is not None and attention_mask.shape[-1] >= responses.shape[-1]:
+        return attention_mask[..., -responses.shape[-1] :].to(device=responses.device).long()
+    return responses.ne(pad_id).long()
+
+
+def _teacher_prompt_ids_for_rows(data: Any, tokenizer: Any, prompt_cap: int) -> list[list[int]] | None:
+    non_tensor_batch = getattr(data, "non_tensor_batch", None) or {}
+    if not isinstance(non_tensor_batch, Mapping):
+        return None
+    input_ids = _batch_tensor(getattr(data, "batch", None), "input_ids")
+    if input_ids is None:
+        return None
+    mode = _internal_teacher_prompt_mode() or "student_reference_solution"
+    rows: list[list[int]] = []
+    for index in range(int(input_ids.shape[0])):
+        row = _non_tensor_row(non_tensor_batch, index)
+        row.setdefault("prompt", row.get("raw_prompt", ""))
+        text = build_teacher_prompt(
+            prompt=row.get("raw_prompt", row.get("prompt", "")),
+            solution=extract_solution(row),
+            mode=mode,
+        )
+        ids = _tokenize_text(tokenizer, text)
+        if prompt_cap > 0 and len(ids) > prompt_cap:
+            ids = ids[-prompt_cap:]
+        rows.append(ids)
+    return rows
+
+
+def _prepare_privileged_internal_teacher_data(data: Any) -> tuple[Any, int] | None:
+    if not _internal_teacher_uses_privileged_prompt():
+        return None
+    tokenizer = _internal_teacher_tokenizer()
+    if tokenizer is None:
+        return None
+    cloned = _clone_teacher_data(data)
+    if cloned is None:
+        return None
+    teacher_data, teacher_batch = cloned
+    responses = _batch_tensor(teacher_batch, "responses")
+    input_ids = _batch_tensor(teacher_batch, "input_ids")
+    if responses is None or input_ids is None:
+        return None
+    pad_id = _tokenizer_pad_id(tokenizer)
+    full_response_width = int(responses.shape[-1])
+    response_cap = _env_int("RLSD_TEACHER_LOGPROB_RESPONSE_LENGTH_CAP", 0)
+    if response_cap <= 0 or response_cap > full_response_width:
+        response_cap = full_response_width
+    max_seq_len = int(input_ids.shape[-1])
+    prompt_cap = _env_int("RLSD_MAX_TEACHER_PROMPT_LENGTH", max_seq_len - response_cap)
+    prompt_cap = max(1, min(prompt_cap, max_seq_len - response_cap))
+    prompt_ids = _teacher_prompt_ids_for_rows(data, tokenizer, prompt_cap)
+    if prompt_ids is None:
+        return None
+
+    response_mask = _response_mask_from_batch(teacher_batch, responses, pad_id)
+    capped_responses: list[list[int]] = []
+    for row in range(int(responses.shape[0])):
+        mask = response_mask[row].bool()
+        row_response = responses[row][mask].detach().cpu().tolist()
+        capped_responses.append([int(x) for x in row_response[:response_cap]])
+
+    prompt_width = max(1, min(prompt_cap, max((len(ids) for ids in prompt_ids), default=1)))
+    response_width = max(1, response_cap)
+    device = responses.device
+    prompt_tensor, prompt_mask = _pad_2d(
+        prompt_ids,
+        width=prompt_width,
+        pad_id=pad_id,
+        device=device,
+        left_pad=True,
+    )
+    response_tensor, capped_response_mask = _pad_2d(
+        capped_responses,
+        width=response_width,
+        pad_id=pad_id,
+        device=device,
+        left_pad=False,
+    )
+    new_input_ids = torch.cat([prompt_tensor, response_tensor], dim=-1)
+    new_attention_mask = torch.cat([prompt_mask, capped_response_mask], dim=-1)
+
+    teacher_batch["input_ids"] = new_input_ids
+    teacher_batch["attention_mask"] = new_attention_mask
+    teacher_batch["position_ids"] = _build_position_ids(new_attention_mask)
+    teacher_batch["responses"] = response_tensor
+    try:
+        teacher_batch["response_mask"] = capped_response_mask
+    except Exception:
+        pass
+    if _get_item(teacher_batch, "prompts") is not None:
+        try:
+            teacher_batch["prompts"] = prompt_tensor
+        except Exception:
+            pass
+    return teacher_data, full_response_width
+
+
+def _pad_teacher_tensor_to_response_width(tensor: torch.Tensor, width: int) -> torch.Tensor:
+    if width <= 0:
+        return tensor
+    if tensor.dim() >= 3:
+        response_dim = -2
+    elif tensor.dim() >= 2:
+        response_dim = -1
+    else:
+        return tensor
+    current = int(tensor.shape[response_dim])
+    if current == width:
+        return tensor
+    if current > width:
+        index = [slice(None)] * tensor.dim()
+        index[response_dim] = slice(0, width)
+        return tensor[tuple(index)]
+    pad_shape = list(tensor.shape)
+    pad_shape[response_dim] = width - current
+    pad = torch.zeros(*pad_shape, dtype=tensor.dtype, device=tensor.device)
+    return torch.cat([tensor, pad], dim=response_dim)
+
+
 def _resolve_internal_teacher_weights(
     worker: Any,
     params: list[tuple[str, torch.nn.Parameter]],
@@ -555,6 +817,11 @@ def _teacher_tensor_from_output(output: Any) -> torch.Tensor | None:
 def _compute_internal_teacher_logprobs(worker: Any, data: Any, compute_fn: Any = None) -> torch.Tensor | None:
     if not _should_compute_internal_teacher_logprobs():
         return None
+    teacher_data = data
+    teacher_response_width = 0
+    prepared = _prepare_privileged_internal_teacher_data(data)
+    if prepared is not None:
+        teacher_data, teacher_response_width = prepared
     _, params = _find_lora_module(worker)
     if not params:
         return None
@@ -571,9 +838,9 @@ def _compute_internal_teacher_logprobs(worker: Any, data: Any, compute_fn: Any =
             actor = getattr(worker, "actor", None)
             infer_batch = getattr(actor, "infer_batch", None)
             if callable(infer_batch):
-                teacher_output = infer_batch(data)
+                teacher_output = infer_batch(teacher_data)
             elif compute_fn is not None:
-                teacher_output = compute_fn(worker, data)
+                teacher_output = compute_fn(worker, teacher_data)
             else:
                 return None
         finally:
@@ -582,6 +849,8 @@ def _compute_internal_teacher_logprobs(worker: Any, data: Any, compute_fn: Any =
     tensor = _teacher_tensor_from_output(teacher_output)
     if tensor is None:
         return None
+    if teacher_response_width > 0:
+        tensor = _pad_teacher_tensor_to_response_width(tensor, teacher_response_width)
     try:
         return tensor.cpu()
     except Exception:

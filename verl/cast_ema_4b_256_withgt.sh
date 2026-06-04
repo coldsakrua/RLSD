@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/cast_ema_4b_256.%j.out
+#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/cast_ema_4b_256_withgt.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -11,17 +11,17 @@
 set -eo pipefail
 
 # Strict-split sign-flip RLSD plus wrong-path positive boost with an EMA teacher.
-# Teacher uses the exact same prompt tokens as the student, while teacher
-# weights follow an EMA of student LoRA so token gaps stay non-zero.
+# Teacher sees the student prompt plus GT/reference solution as privileged
+# context, while teacher weights follow an EMA of student LoRA.
 #
 # Defaults are length-safe: GRPO assigns A to every token, teacher RLSD shaping
 # applies only to the first TEACHER_SHAPING_LENGTH_CAP response tokens; tail keeps GRPO A.
-RUN_CONFIG="${RUN_CONFIG:-cast_ema_4b_256}"
+RUN_CONFIG="${RUN_CONFIG:-cast_ema_4b_256_withgt}"
 ADV_ESTIMATOR="${ADV_ESTIMATOR:-rlsd_strict_split_flip_wrong_boost}"
 REWARD_FUNCTION_NAME="${REWARD_FUNCTION_NAME:-compute_score}"
 TOKEN_GAP_LAMBDA="${TOKEN_GAP_LAMBDA:-0.5}"
 TOKEN_GAP_DECAY_STEPS="${TOKEN_GAP_DECAY_STEPS:-300}"
-TEACHER_PROMPT_MODE="${TEACHER_PROMPT_MODE:-identical_student}"
+TEACHER_PROMPT_MODE="${TEACHER_PROMPT_MODE:-student_reference_solution}"
 OFFICIAL_TEACHER_PROMPT="${OFFICIAL_TEACHER_PROMPT:-false}"
 DISTILLATION_LOSS_COEF="${DISTILLATION_LOSS_COEF:-0.0}"
 
@@ -119,9 +119,11 @@ mkdir -p "${WANDB_DATA_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_ARTIFACT_DIR}"
 MAX_STEPS="${MAX_STEPS:-300}"
 SAVE_STEPS="${SAVE_STEPS:-50}"
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-3072}"
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}"
 MAX_LENGTH="$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))"
 TEACHER_SHAPING_LENGTH_CAP="${TEACHER_SHAPING_LENGTH_CAP:-256}"
+TEACHER_LOGPROB_RESPONSE_LENGTH_CAP="${TEACHER_LOGPROB_RESPONSE_LENGTH_CAP:-${TEACHER_SHAPING_LENGTH_CAP}}"
+MAX_TEACHER_PROMPT_LENGTH="${MAX_TEACHER_PROMPT_LENGTH:-$((MAX_LENGTH - TEACHER_LOGPROB_RESPONSE_LENGTH_CAP))}"
 
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.9}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
@@ -171,6 +173,9 @@ export RLSD_TEACHER_EMA_ADAPTER_PATH="${OUTPUT_DIR}/teacher_ema_adapter"
 export RLSD_TEACHER_EMA_DECAY="${TEACHER_EMA_DECAY}"
 export RLSD_INTERNAL_TEACHER_LOGPROB="${INTERNAL_TEACHER_LOGPROB}"
 export RLSD_INTERNAL_TEACHER_STRICT="${INTERNAL_TEACHER_STRICT}"
+export RLSD_TEACHER_PROMPT_MODE="${TEACHER_PROMPT_MODE}"
+export RLSD_MAX_TEACHER_PROMPT_LENGTH="${MAX_TEACHER_PROMPT_LENGTH}"
+export RLSD_TEACHER_LOGPROB_RESPONSE_LENGTH_CAP="${TEACHER_LOGPROB_RESPONSE_LENGTH_CAP}"
 
 LOGGER="${LOGGER:-['console','wandb']}"
 if [ "${DISABLE_WANDB}" = "true" ]; then
@@ -189,8 +194,9 @@ VERL_ARGS=(
     "++algorithm.rlsd.reward_binary_threshold=${REWARD_BINARY_THRESHOLD}"
     "++algorithm.rlsd.teacher_prompt_mode=${TEACHER_PROMPT_MODE}"
     "++algorithm.rlsd.official_teacher_prompt=${OFFICIAL_TEACHER_PROMPT}"
-    "++algorithm.rlsd.max_teacher_prompt_length=${MAX_PROMPT_LENGTH}"
+    "++algorithm.rlsd.max_teacher_prompt_length=${MAX_TEACHER_PROMPT_LENGTH}"
     "++algorithm.rlsd.teacher_shaping_length_cap=${TEACHER_SHAPING_LENGTH_CAP}"
+    "++algorithm.rlsd.teacher_logprob_response_length_cap=${TEACHER_LOGPROB_RESPONSE_LENGTH_CAP}"
     "++algorithm.rlsd.teacher_ema_enabled=${TEACHER_EMA_ENABLED}"
     "++algorithm.rlsd.teacher_ema_decay=${TEACHER_EMA_DECAY}"
     "++algorithm.rlsd.teacher_ema_update_interval_steps=${TEACHER_EMA_UPDATE_INTERVAL_STEPS}"

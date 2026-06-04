@@ -669,6 +669,8 @@ def _patch_ray_init_for_vllm() -> None:
             )
         if os.environ.get("MATH_PROMPT_PREFIX"):
             env_vars.setdefault("MATH_PROMPT_PREFIX", os.environ["MATH_PROMPT_PREFIX"])
+        if os.environ.get("MATH_PROMPT_SUFFIX"):
+            env_vars.setdefault("MATH_PROMPT_SUFFIX", os.environ["MATH_PROMPT_SUFFIX"])
         if os.environ.get("STRIP_DAPO_PROMPT_BOILERPLATE"):
             env_vars.setdefault(
                 "STRIP_DAPO_PROMPT_BOILERPLATE",

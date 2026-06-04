@@ -72,6 +72,9 @@ class RLSDTeacherAgentLoopWorker(AgentLoopWorker):
         mode = self._teacher_prompt_mode().strip().lower()
         return mode in {"identical_student", "same_as_student", "student_identical"}
 
+    def _teacher_logprob_response_length_cap(self) -> int:
+        return int(_cfg_get(self.config, "algorithm.rlsd.teacher_logprob_response_length_cap", 0) or 0)
+
     def _student_prompt_ids_from_output(self, output: _InternalAgentLoopOutput) -> list[int]:
         prompt_ids = output.prompt_ids[0].detach().cpu().tolist()
         pad_id = int(getattr(self.tokenizer, "pad_token_id", 0) or 0)
@@ -161,6 +164,9 @@ class RLSDTeacherAgentLoopWorker(AgentLoopWorker):
         response_ids_padded = output.response_ids[0]
         response_mask = output.response_mask[0].bool()
         response_ids = response_ids_padded[response_mask].detach().cpu().tolist()
+        response_cap = self._teacher_logprob_response_length_cap()
+        if response_cap > 0:
+            response_ids = response_ids[:response_cap]
         if not response_ids:
             return
 

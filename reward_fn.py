@@ -13,7 +13,7 @@ def configure_math_reward_extraction(
     """
     Configure answer extraction for reward scoring.
 
-    When ``boxed_last_token_fraction > 0``, only ``\\boxed{...}`` / ``<answer>`` spans whose **start character index**
+    When ``boxed_last_token_fraction > 0``, only ``\\boxed{...}`` spans whose **start character index**
     lies in the last that fraction of **completion tokens** (via ``offset_mapping`` when ``tokenizer`` is set).
     If ``tokenizer`` is ``None``, non-whitespace runs (``re.finditer(r"\\S+", text)``) are used as a coarse token proxy.
     Ground-truth strings should use ``for_ground_truth=True`` in ``_extract_final_answer`` (no tail gate).
@@ -236,63 +236,50 @@ def _longest_consecutive_boxed_run(text: str) -> tuple[int, int]:
     return _longest_consecutive_boxed_run_for_matches(text or "", _find_boxed_balanced(text or ""))
 
 
+def _extract_boxed_answer(text: str, *, tail_start: int = 0) -> str:
+    boxed = _find_boxed_balanced(text)
+    if tail_start > 0:
+        boxed = [b for b in boxed if b[0] >= tail_start]
+    if not boxed:
+        return ""
+    run_start, run_len = _longest_consecutive_boxed_run_for_matches(text, boxed)
+    # If there is a consecutive boxed run (e.g. boxed spam), score by the FIRST boxed answer.
+    if run_start >= 0 and run_len >= 2:
+        return boxed[run_start][2].strip()
+    return boxed[-1][2].strip()
+
+
 def _extract_final_answer(text: str, *, for_ground_truth: bool = False) -> str:
     """
-    Prefer the **last** tag/boxed match: last ``<answer>...</answer>``, else last balanced ``\\boxed{...}``,
-    else the last non-empty line (after stripping thinking blocks).
+    For model completions, extract only a balanced ``\\boxed{...}`` answer.
+    Ground truth keeps legacy fallbacks because many datasets store a scalar answer
+    or full solution rather than an already-boxed final answer.
 
     For model completions (``for_ground_truth=False``), if ``configure_math_reward_extraction`` set a positive
-    ``boxed_last_token_fraction``, only matches whose **start** lies in the last that fraction of **tokens** count.
+    ``boxed_last_token_fraction``, only boxed matches whose **start** lies in the last that fraction of **tokens** count.
     """
     text = _strip_thinking_blocks(text or "")
 
-    frac = 0.0 if for_ground_truth else float(_MATH_REWARD_EXTRACT_CFG.get("boxed_last_token_fraction") or 0.0)
-    tok = None if for_ground_truth else _MATH_REWARD_EXTRACT_CFG.get("tokenizer")
-    tail_start = _char_start_of_last_token_fraction(text, tok, frac) if frac > 0 else 0
+    if not for_ground_truth:
+        frac = float(_MATH_REWARD_EXTRACT_CFG.get("boxed_last_token_fraction") or 0.0)
+        tok = _MATH_REWARD_EXTRACT_CFG.get("tokenizer")
+        tail_start = _char_start_of_last_token_fraction(text, tok, frac) if frac > 0 else 0
+        return _extract_boxed_answer(text, tail_start=tail_start)
 
-    if frac > 0 and not for_ground_truth:
-        last_ans = None
-        for m in _ANSWER_TAG_RE.finditer(text):
-            if m.start() >= tail_start:
-                last_ans = m.group(1).strip()
-        if last_ans is not None:
-            return last_ans
-    else:
-        tag_matches = _ANSWER_TAG_RE.findall(text)
-        if tag_matches:
-            return tag_matches[-1].strip()
+    boxed_answer = _extract_boxed_answer(text)
+    if boxed_answer:
+        return boxed_answer
 
-    if frac > 0 and not for_ground_truth:
-        last_line_ans = None
-        for m in _ANSWER_LINE_RE.finditer(text):
-            if m.start() >= tail_start:
-                last_line_ans = m.group(1).strip()
-        if last_line_ans is not None:
-            return last_line_ans
-    else:
-        ans_matches = _ANSWER_LINE_RE.findall(text)
-        if ans_matches:
-            return ans_matches[-1].strip()
+    tag_matches = _ANSWER_TAG_RE.findall(text)
+    if tag_matches:
+        return tag_matches[-1].strip()
 
-    boxed = _find_boxed_balanced(text)
-    if frac > 0 and not for_ground_truth:
-        boxed = [b for b in boxed if b[0] >= tail_start]
-    if boxed:
-        run_start, run_len = _longest_consecutive_boxed_run_for_matches(text, boxed)
-        # If there is a consecutive boxed run (e.g. boxed spam), score by the FIRST boxed answer.
-        if run_start >= 0 and run_len >= 2:
-            return boxed[run_start][2].strip()
-        return boxed[-1][2].strip()
+    ans_matches = _ANSWER_LINE_RE.findall(text)
+    if ans_matches:
+        return ans_matches[-1].strip()
 
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
     if not lines:
-        return ""
-    if frac > 0 and not for_ground_truth:
-        # Last line only counts if it begins in the tail token region (same char threshold proxy).
-        last_line = lines[-1]
-        idx = text.rfind(last_line)
-        if idx >= 0 and idx >= tail_start:
-            return last_line
         return ""
     return lines[-1]
 

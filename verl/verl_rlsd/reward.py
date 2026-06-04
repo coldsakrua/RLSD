@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import re
 import os
 from typing import Any, Mapping
 
@@ -35,20 +34,47 @@ except Exception:  # pragma: no cover - server import path handles the normal ca
     verifiable_math_reward_with_format_penalties = None
 
 
-_BOXED_RE = re.compile(r"\\boxed\{([^{}]+)\}")
+_BOXED_BEGIN = "\\boxed{"
 _REWARD_EXTRACTION_CONFIGURED = False
 
 
+def _find_boxed_balanced(text: str) -> list[str]:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    blen = len(_BOXED_BEGIN)
+    while i < n:
+        j = text.find(_BOXED_BEGIN, i)
+        if j < 0:
+            break
+        body_start = j + blen
+        depth = 1
+        k = body_start
+        while k < n and depth > 0:
+            ch = text[k]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            k += 1
+        if depth == 0:
+            out.append(text[body_start : k - 1].strip())
+            i = k
+        else:
+            i = j + 1
+    return out
+
+
 def _last_boxed(text: str) -> str:
-    matches = _BOXED_RE.findall(text or "")
+    matches = _find_boxed_balanced(text or "")
     if matches:
-        return matches[-1].strip()
-    return (text or "").strip()
+        return matches[-1]
+    return ""
 
 
 def _fallback_score(completion: str, ground_truth: str) -> float:
     pred = _last_boxed(completion)
-    gt = _last_boxed(ground_truth)
+    gt = _last_boxed(ground_truth) or (ground_truth or "").strip()
     return 1.0 if pred and gt and pred == gt else 0.0
 
 
