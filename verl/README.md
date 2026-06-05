@@ -16,27 +16,27 @@ that exist at the repository root.
   response logprobs under reference-solution, no-reference, identical-student,
   official-OPSD, or successful-rollout teacher prompts.
 - `verl_rlsd/teacher_ema.py`: EMA teacher LoRA sync for `cast_ema_4b.sh`.
-- `*_4b*.sh`: one fully self-contained sbatch script per experiment.
+- `train_scripts/*_4b*.sh`: one fully self-contained sbatch script per veRL training experiment.
 
 ## Script mapping
 
 | Root script | veRL script | Main behavior |
 | --- | --- | --- |
-| `opsd_4b_only.sh` | `verl/grpo_opds_4b.sh` | Pure OPSD-style token-gap shaping with reward, lambda 0.2, decay 50. |
-| `opsd_4b.sh` | `verl/opsd_4b.sh` | Official OPSD-style distillation-only run, n=1, official teacher prompt. |
-| `grpo_4b_strict.sh` | `verl/grpo_4b.sh` | Strict GRPO baseline, no teacher shaping or distillation. |
-| `rlrt_4b.sh` | `verl/rlrt_4b.sh` | RLRT reversed teacher weighting, lambda 0.5, no decay, successful-rollout teacher context. |
-| `rlsd_4b_paper.sh` | `verl/rlsd_4b.sh` | Canonical RLSD paper token shaping, lambda 0.5, decay 50. |
-| `rlsd_4b_strict_split_flip_nodecay_no_teacher_ref.sh` | `verl/cast_nowrongboost_4b.sh` | Strict split sign flip, lambda 1.0, no decay, no reference solution in teacher prompt. |
-| `rlsd_4b_strict_split_flip_wrong_boost_nodecay_teacher_ref.sh` | `verl/cast_4b.sh` | Strict split sign flip plus wrong-path positive boost, lambda 1.0, teacher sees reference solution. |
-| — | `verl/cast_ema_4b.sh` | Same as `cast_4b.sh` but identical student prompt and EMA teacher LoRA. |
+| `train_scripts/opsd_4b_only.sh` | `verl/train_scripts/grpo_opds_4b.sh` | Pure OPSD-style token-gap shaping with reward, lambda 0.2, decay 50. |
+| `train_scripts/opsd_4b.sh` | `verl/train_scripts/opsd_4b.sh` | Official OPSD-style distillation-only run, n=1, official teacher prompt. |
+| `train_scripts/grpo_4b_strict.sh` | `verl/train_scripts/grpo_4b.sh` | Strict GRPO baseline, no teacher shaping or distillation. |
+| `train_scripts/rlrt_4b.sh` | `verl/train_scripts/rlrt_4b.sh` | RLRT reversed teacher weighting, lambda 0.5, no decay, successful-rollout teacher context. |
+| `train_scripts/rlsd_4b_paper.sh` | `verl/train_scripts/rlsd_4b.sh` | Canonical RLSD paper token shaping, lambda 0.5, decay 50. |
+| `train_scripts/rlsd_4b_strict_split_flip_nodecay_no_teacher_ref.sh` | `verl/train_scripts/cast_nowrongboost_4b.sh` | Strict split sign flip, lambda 1.0, no decay, no reference solution in teacher prompt. |
+| `train_scripts/rlsd_4b_strict_split_flip_wrong_boost_nodecay_teacher_ref.sh` | `verl/train_scripts/cast_4b.sh` | Strict split sign flip plus wrong-path positive boost, lambda 1.0, teacher sees reference solution. |
+| — | `verl/train_scripts/cast_ema_4b_256(nogap005).sh` | CAST EMA variant; see `train_scripts/cast_ema_4b*.sh` for other configs. |
 
 ## Submit on the server
 
 From the repository root:
 
 ```bash
-sbatch verl/rlsd_4b.sh
+sbatch verl/train_scripts/rlsd_4b.sh
 ```
 
 Useful overrides:
@@ -46,14 +46,14 @@ BASE_DIR=/gpfs/share/home/2501210611/RLSD \
 MODEL_PATH=/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b \
 DATASET_PATH=/gpfs/share/home/2501210611/RLSD/data/dapo/dapo-math-17k.parquet \
 MAX_STEPS=300 \
-sbatch verl/rlsd_4b.sh
+sbatch verl/train_scripts/rlsd_4b.sh
 ```
 
 Most teacher-distillation scripts default to one actor/rollout GPU plus one
 teacher GPU:
 
 ```bash
-ACTOR_GPUS_PER_NODE=1 TEACHER_GPUS_PER_NODE=1 sbatch verl/rlsd_4b.sh
+ACTOR_GPUS_PER_NODE=1 TEACHER_GPUS_PER_NODE=1 sbatch verl/train_scripts/rlsd_4b.sh
 ```
 
 `cast_ema_4b.sh` is the exception: its EMA teacher is computed inside the
@@ -61,7 +61,7 @@ actor worker, so both GPUs default to the main actor/rollout pool and no
 separate teacher GPU is reserved:
 
 ```bash
-ACTOR_GPUS_PER_NODE=2 DISTILLATION_ENABLED=false sbatch verl/cast_ema_4b.sh
+ACTOR_GPUS_PER_NODE=2 DISTILLATION_ENABLED=false sbatch verl/train_scripts/cast_ema_4b_256(nogap005).sh
 ```
 
 Batch defaults:
@@ -84,7 +84,14 @@ Append raw veRL/Hydra overrides with `VERL_EXTRA_ARGS`, for example:
 
 ```bash
 VERL_EXTRA_ARGS="trainer.resume_mode=auto actor_rollout_ref.rollout.gpu_memory_utilization=0.85" \
-sbatch verl/rlsd_4b.sh
+sbatch verl/train_scripts/rlsd_4b.sh
 ```
 
 W&B defaults to offline mode. Sync later from the output directory if needed.
+
+Eval launchers live under `eval_scripts/` at the repository root, for example:
+
+```bash
+CHECKPOINT_DIR=/gpfs/share/home/2501210611/RLSD/outputs/cast_ema_4b_256(nogap005)/job_xxx/global_step_200/actor/lora_adapter \
+sbatch eval_scripts/eval_32k_aime24_think.sh
+```
