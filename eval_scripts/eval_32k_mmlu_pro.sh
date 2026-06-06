@@ -10,8 +10,13 @@
 set -eo pipefail
 nvidia-smi
 
-_EVAL_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_DIR="$(cd "${_EVAL_SCRIPT}/.." && pwd)"
+# sbatch may copy the script into /var/spool/...; prefer SLURM submit dir over BASH_SOURCE.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    BASE_DIR="${BASE_DIR:-${SLURM_SUBMIT_DIR}}"
+else
+    _EVAL_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    BASE_DIR="$(cd "${_EVAL_SCRIPT}/.." && pwd)"
+fi
 cd "${BASE_DIR}"
 
 source activate anchor

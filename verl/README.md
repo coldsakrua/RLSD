@@ -29,7 +29,7 @@ that exist at the repository root.
 | `train_scripts/rlsd_4b_paper.sh` | `verl/train_scripts/rlsd_4b.sh` | Canonical RLSD paper token shaping, lambda 0.5, decay 50. |
 | `train_scripts/rlsd_4b_strict_split_flip_nodecay_no_teacher_ref.sh` | `verl/train_scripts/cast_nowrongboost_4b.sh` | Strict split sign flip, lambda 1.0, no decay, no reference solution in teacher prompt. |
 | `train_scripts/rlsd_4b_strict_split_flip_wrong_boost_nodecay_teacher_ref.sh` | `verl/train_scripts/cast_4b.sh` | Strict split sign flip plus wrong-path positive boost, lambda 1.0, teacher sees reference solution. |
-| — | `verl/train_scripts/cast_ema_4b_256(nogap005).sh` | CAST EMA variant; see `train_scripts/cast_ema_4b*.sh` for other configs. |
+| — | `verl/train_scripts/cast_ema_4b_256_nogap005.sh` | CAST EMA variant; see `train_scripts/cast_ema_4b*.sh` for other configs. |
 
 ## Submit on the server
 
@@ -61,7 +61,7 @@ actor worker, so both GPUs default to the main actor/rollout pool and no
 separate teacher GPU is reserved:
 
 ```bash
-ACTOR_GPUS_PER_NODE=2 DISTILLATION_ENABLED=false sbatch verl/train_scripts/cast_ema_4b_256(nogap005).sh
+ACTOR_GPUS_PER_NODE=2 DISTILLATION_ENABLED=false sbatch verl/train_scripts/cast_ema_4b_256_nogap005.sh
 ```
 
 Batch defaults:
@@ -92,6 +92,6 @@ W&B defaults to offline mode. Sync later from the output directory if needed.
 Eval launchers live under `eval_scripts/` at the repository root, for example:
 
 ```bash
-CHECKPOINT_DIR=/gpfs/share/home/2501210611/RLSD/outputs/cast_ema_4b_256(nogap005)/job_xxx/global_step_200/actor/lora_adapter \
+CHECKPOINT_DIR=/gpfs/share/home/2501210611/RLSD/outputs/cast_ema_4b_256_nogap005/job_xxx/global_step_200/actor/lora_adapter \
 sbatch eval_scripts/eval_32k_aime24_think.sh
 ```

@@ -185,6 +185,7 @@ class RLSDSignFlipStrictSplitTrainer(RLSDTrainer):
             teacher_prompts=teacher_prompts,
         )
         g = (teacher_logps - student_logps).detach() * completion_mask
+        g = self._mask_token_gap_within_teacher_cap(g, completion_mask)
 
         snap_mask = self._completion_mask_through_first_eos(completion_ids)
         completion_texts = self._decode_completion_texts(completion_ids, snap_mask)
@@ -263,6 +264,7 @@ class RLSDSignFlipStrictSplitTrainer(RLSDTrainer):
                 torch.zeros_like(shaped),
             )
             shown_weight = torch.where(flip_mask, down_weight, weight)
+            shaped = self._blend_teacher_shaping_length_cap(base_adv, shaped, completion_mask)
             return shaped * completion_mask, shown_weight, effective_delta, flip_mask.float()
 
         mixed_adv, mixed_weight, mixed_delta, mixed_flip = _shape_with_token_gap(mixed_base_adv)

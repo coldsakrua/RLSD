@@ -122,3 +122,35 @@ class RLSDRLHFDataset(RLHFDataset):
     def _build_messages(self, example: dict):
         messages = super()._build_messages(example)
         return strip_dapo_prompt_boilerplate(messages)
+
+    def _read_files_and_tokenize(self):
+        import datasets
+
+        dataframes = []
+        for parquet_file in self.data_files:
+            dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
+            dataframes.append(dataframe)
+        self.dataframe = datasets.concatenate_datasets(dataframes)
+
+        print(f"dataset len: {len(self.dataframe)}")
+
+        if self.filter_overlong_prompts:
+            tokenizer = self.tokenizer
+
+            def doc2len(doc) -> int:
+                row = dict(doc)
+                messages = self._build_messages(row)
+                return len(
+                    tokenizer.apply_chat_template(
+                        messages,
+                        add_generation_prompt=True,
+                        **self.apply_chat_template_kwargs,
+                    )
+                )
+
+            self.dataframe = self.dataframe.filter(
+                lambda doc: doc2len(doc) <= self.max_prompt_length,
+                num_proc=self.num_workers,
+                desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
+            )
+            print(f"filter dataset len: {len(self.dataframe)}")

@@ -12,6 +12,7 @@ from .qwen3_chat_template import (
     strip_empty_thinking_enabled,
     strip_empty_thinking_generation_prompt,
 )
+from .batch_truncate import prepare_rollout_batch
 from .rollout_dump import patch_rollout_dump
 from .rollout_metrics import patch_rollout_length_logging
 from .teacher_ema import patch_teacher_ema
@@ -56,6 +57,63 @@ def _patch_compute_advantage() -> None:
         )
 
     ray_trainer.compute_advantage = patched_compute_advantage
+
+
+def _log_rollout_batch_prep(mode: str, count: int) -> None:
+    if count <= 0:
+        return
+    if mode == "discard":
+        print(
+            f"[rlsd] discarded {count} truncated rollout sample(s) "
+            f"(max_response_len={os.environ.get('RLSD_MAX_RESPONSE_LENGTH', 'unset')})",
+            flush=True,
+        )
+        return
+    print(
+        f"[rlsd] truncated rollout batch by {count} tokens "
+        f"(max_seq_len={os.environ.get('RLSD_MAX_SEQ_LEN', 'unset')}, "
+        f"max_response_len={os.environ.get('RLSD_MAX_RESPONSE_LENGTH', 'unset')})",
+        flush=True,
+    )
+
+
+def _patch_truncate_rollout_batch() -> None:
+    try:
+        ray_trainer = importlib.import_module("verl.trainer.ppo.ray_trainer")
+    except Exception:
+        return
+    original = getattr(ray_trainer, "compute_response_mask", None)
+    if original is None or getattr(original, "_rlsd_truncate_patched", False):
+        return
+
+    def patched_compute_response_mask(data: Any):
+        mode, count = prepare_rollout_batch(data)
+        _log_rollout_batch_prep(mode, count)
+        return original(data)
+
+    patched_compute_response_mask._rlsd_truncate_patched = True
+    ray_trainer.compute_response_mask = patched_compute_response_mask
+
+
+def _patch_truncate_before_logprob() -> None:
+    try:
+        fsdp_workers = importlib.import_module("verl.workers.fsdp_workers")
+    except Exception:
+        return
+    worker_cls = getattr(fsdp_workers, "ActorRolloutRefWorker", None)
+    if worker_cls is None:
+        return
+    original = getattr(worker_cls, "compute_log_prob", None)
+    if original is None or getattr(original, "_rlsd_truncate_patched", False):
+        return
+
+    def patched_compute_log_prob(self, data: Any):
+        mode, count = prepare_rollout_batch(data)
+        _log_rollout_batch_prep(mode, count)
+        return original(self, data)
+
+    patched_compute_log_prob._rlsd_truncate_patched = True
+    worker_cls.compute_log_prob = patched_compute_log_prob
 
 
 _RAY_INIT_OLD = "ray.init(namespace=namespace)"
@@ -778,6 +836,8 @@ def main() -> None:
     _patch_fsdp_vllm_add_lora_on_disk()
     _patch_ray_init_for_vllm()
     _patch_compute_advantage()
+    _patch_truncate_rollout_batch()
+    _patch_truncate_before_logprob()
     patch_rollout_length_logging()
     patch_rollout_dump()
     patch_teacher_ema()

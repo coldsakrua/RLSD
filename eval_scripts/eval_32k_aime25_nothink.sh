@@ -11,8 +11,13 @@
 set -eo pipefail
 nvidia-smi
 
-_EVAL_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_DIR="$(cd "${_EVAL_SCRIPT}/.." && pwd)"
+# sbatch may copy the script into /var/spool/...; prefer SLURM submit dir over BASH_SOURCE.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    BASE_DIR="${BASE_DIR:-${SLURM_SUBMIT_DIR}}"
+else
+    _EVAL_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    BASE_DIR="$(cd "${_EVAL_SCRIPT}/.." && pwd)"
+fi
 cd "${BASE_DIR}"
 
 source activate anchor
@@ -32,7 +37,7 @@ model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/q
 datasets_csv=${DATASETS:-aime25}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/cast_ema_4b_256(nogap005)/job_2182214/global_step_200/actor/lora_adapter}}
+checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/cast_ema_4b_256_nogap005/job_2182214/global_step_200/actor/lora_adapter}}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
 use_lora=${USE_LORA:-1}
 num_samples=${NUM_SAMPLES:-0}

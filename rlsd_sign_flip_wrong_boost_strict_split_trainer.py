@@ -81,6 +81,7 @@ class RLSDSignFlipWrongBoostStrictSplitTrainer(RLSDSignFlipStrictSplitTrainer):
         up_factor = torch.clamp(1.0 + lambda_now * (up_weight - 1.0), min=0.0)
         flipped_up = base_adv.abs() * up_factor
         shaped = torch.where(up_flip_mask, flipped_up, shaped)
+        shaped = self._blend_teacher_shaping_length_cap(base_adv, shaped, completion_mask)
 
         flip_mask = down_flip_mask | up_flip_mask
         shown_weight = torch.where(down_flip_mask, down_weight, weight)
@@ -128,6 +129,7 @@ class RLSDSignFlipWrongBoostStrictSplitTrainer(RLSDSignFlipStrictSplitTrainer):
                 teacher_prompts=teacher_prompts,
             )
             g = (teacher_logps - student_logps).detach() * completion_mask
+            g = self._mask_token_gap_within_teacher_cap(g, completion_mask)
 
         snap_mask = self._completion_mask_through_first_eos(completion_ids)
         completion_texts = self._decode_completion_texts(completion_ids, snap_mask)
@@ -269,6 +271,11 @@ class RLSDSignFlipWrongBoostStrictSplitTrainer(RLSDSignFlipStrictSplitTrainer):
         token_count = completion_mask.sum().clamp(min=1.0)
 
         self._log_metric("token_gap_lambda", lambda_now)
+        self._log_metric("teacher_shaping_length_cap", float(self.teacher_shaping_length_cap))
+        self._log_metric(
+            "teacher_logprob_response_length_cap",
+            float(self._effective_teacher_logprob_response_length_cap()),
+        )
         self._log_metric("mixed_only", float(mixed_only_now))
         self._log_metric("grpo_mixed_only_phase", float(grpo_mixed_only_phase))
         self._log_metric(

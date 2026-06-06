@@ -29,6 +29,8 @@ class RLSDTrainer(GRPOTrainer):
         teacher_prompt_template: str = DEFAULT_TEACHER_PROMPT_WITH_REFERENCE,
         teacher_prompt_template_no_reference: str = DEFAULT_TEACHER_PROMPT_NO_REFERENCE,
         teacher_include_reference_solution: bool = True,
+        teacher_shaping_length_cap: int = 0,
+        teacher_logprob_response_length_cap: int = 0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -42,6 +44,8 @@ class RLSDTrainer(GRPOTrainer):
         self.teacher_prompt_template = teacher_prompt_template
         self.teacher_prompt_template_no_reference = teacher_prompt_template_no_reference
         self.teacher_include_reference_solution = bool(teacher_include_reference_solution)
+        self.teacher_shaping_length_cap = max(0, int(teacher_shaping_length_cap))
+        self.teacher_logprob_response_length_cap = max(0, int(teacher_logprob_response_length_cap))
         self._teacher_snapshot_step: int = -1
         self._teacher_snapshot_state: Optional[Dict[str, torch.Tensor]] = None
 
@@ -331,6 +335,43 @@ class RLSDTrainer(GRPOTrainer):
             )
         return self._extract_logps(output).detach()
 
+    def _effective_teacher_logprob_response_length_cap(self) -> int:
+        cap = self.teacher_logprob_response_length_cap
+        if cap > 0:
+            return cap
+        return self.teacher_shaping_length_cap
+
+    def _cap_completion_mask(self, completion_mask: torch.Tensor, cap: int) -> torch.Tensor:
+        if cap <= 0:
+            return completion_mask
+        response_pos = torch.cumsum(completion_mask.long(), dim=-1)
+        return completion_mask * (response_pos <= cap).float()
+
+    def _blend_teacher_shaping_length_cap(
+        self,
+        base_adv: torch.Tensor,
+        shaped_adv: torch.Tensor,
+        completion_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        cap = self.teacher_shaping_length_cap
+        if cap <= 0:
+            return shaped_adv
+        response_pos = torch.cumsum(completion_mask.long(), dim=-1)
+        within_cap = (response_pos <= float(cap)) & completion_mask.bool()
+        return torch.where(within_cap, shaped_adv, base_adv)
+
+    def _mask_token_gap_within_teacher_cap(
+        self,
+        token_gap: torch.Tensor,
+        completion_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        cap = self.teacher_shaping_length_cap
+        if cap <= 0:
+            return token_gap
+        response_pos = torch.cumsum(completion_mask.long(), dim=-1)
+        within_cap = (response_pos <= float(cap)) & completion_mask.bool()
+        return torch.where(within_cap, token_gap, torch.zeros_like(token_gap))
+
     def _compute_teacher_logps(
         self,
         completion_ids: torch.Tensor,
@@ -339,6 +380,10 @@ class RLSDTrainer(GRPOTrainer):
     ) -> torch.Tensor:
         tokenizer = self._get_tokenizer()
         device = completion_ids.device
+        teacher_completion_mask = self._cap_completion_mask(
+            completion_mask,
+            self._effective_teacher_logprob_response_length_cap(),
+        )
 
         original_padding_side = getattr(tokenizer, "padding_side", "right")
         tokenizer.padding_side = "left"
@@ -353,7 +398,7 @@ class RLSDTrainer(GRPOTrainer):
         prefix_ids = encoded["input_ids"].to(device)
         prefix_mask = encoded["attention_mask"].to(device)
         teacher_input_ids = torch.cat([prefix_ids, completion_ids], dim=1)
-        teacher_attention_mask = torch.cat([prefix_mask, completion_mask.long()], dim=1)
+        teacher_attention_mask = torch.cat([prefix_mask, teacher_completion_mask.long()], dim=1)
         logits_to_keep = completion_ids.size(1)
 
         model_for_teacher = self._unwrap_model_for_teacher()

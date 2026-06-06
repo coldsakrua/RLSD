@@ -37,9 +37,15 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-4}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}"
 LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-2}"
 
-_VERL_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_DIR="$(cd "${_VERL_SCRIPT}/.." && pwd)"
-BASE_DIR="${BASE_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+# sbatch may copy the script into /var/spool/...; prefer SLURM submit dir over BASH_SOURCE.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    BASE_DIR="${BASE_DIR:-${SLURM_SUBMIT_DIR}}"
+    SCRIPT_DIR="${SCRIPT_DIR:-${SLURM_SUBMIT_DIR}/verl}"
+else
+    _VERL_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SCRIPT_DIR="$(cd "${_VERL_SCRIPT}/.." && pwd)"
+    BASE_DIR="${BASE_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+fi
 cd "${BASE_DIR}"
 
 CONDA_ENV="${CONDA_ENV:-anchor}"
@@ -91,6 +97,9 @@ SAVE_STEPS="${SAVE_STEPS:-50}"
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-3072}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1536}"
 MAX_LENGTH="$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))"
+export RLSD_MAX_SEQ_LEN="${MAX_LENGTH}"
+export RLSD_MAX_RESPONSE_LENGTH="${MAX_COMPLETION_LENGTH}"
+export RLSD_MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH}"
 MAX_TEACHER_PROMPT_LENGTH="${MAX_TEACHER_PROMPT_LENGTH:-${MAX_PROMPT_LENGTH}}"
 
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.9}"
@@ -154,6 +163,7 @@ VERL_ARGS=(
     "data.train_batch_size=${TRAIN_BATCH_SIZE}"
     "data.max_prompt_length=${MAX_PROMPT_LENGTH}"
     "data.max_response_length=${MAX_COMPLETION_LENGTH}"
+    "data.truncation=left"
     "++data.return_raw_chat=true"
     "++data.apply_chat_template_kwargs.enable_thinking=false"
     "custom_reward_function.path=${SCRIPT_DIR}/verl_rlsd/reward.py"
