@@ -1,18 +1,19 @@
 #!/bin/bash
-#SBATCH -o logs/opsd_llama3_2_3b.%j.out
+#SBATCH -o logs/llama_logs/rlsd_llama3_2_3b_strict_split_flip_wrong_boost_nodecay_no_teacher_ref.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n26,gpua800n04,gpua800n11,gpua800n03
+#SBATCH --exclude=gpua800n07,gpua800n02,gpua800n12
+
 set -eo pipefail
 nvidia-smi
 
 BASE_DIR="/gpfs/share/home/2501210611/RLSD"
 cd "${BASE_DIR}"
-mkdir -p logs
+mkdir -p logs/llama_logs
 
 source activate anchor
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
@@ -25,8 +26,8 @@ unset ROCR_VISIBLE_DEVICES
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/llama-3.2-3b-instruct}
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/opsd_llama3_2_3b}
-RUN_CONFIG=${RUN_CONFIG:-opsd_llama3_2_3b}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_llama3_2_3b_strict_split_flip_wrong_boost_nodecay_no_teacher_ref}
+RUN_CONFIG=${RUN_CONFIG:-rlsd_llama3_2_3b_strict_split_flip_wrong_boost_nodecay_no_teacher_ref}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
@@ -37,7 +38,7 @@ export WANDB_DIR="${OUTPUT_DIR}"
 export WANDB_DATA_DIR="${OUTPUT_DIR}/.wandb_data"
 mkdir -p "${WANDB_DATA_DIR}"
 
-MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
+MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12950}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
 PER_DEVICE_BS=${PER_DEVICE_BS:-2}
 MAX_STEPS=${MAX_STEPS:-300}
@@ -45,19 +46,16 @@ MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
 # Keep enough prompt budget: trainer computes max_prompt_length = max_length - max_completion_length.
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_LENGTH=$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))
-MAX_TEACHER_PROMPT_LENGTH=${MAX_TEACHER_PROMPT_LENGTH:-${MAX_PROMPT_LENGTH}}
-ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 PROMPT_PREFIX=${PROMPT_PREFIX:-}
 PROMPT_SUFFIX=${PROMPT_SUFFIX:-}
 NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX:-false}
 MATH_INSTRUCTION_SUFFIX=${MATH_INSTRUCTION_SUFFIX:-}
 USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-true}
 
-# OPSD paper/repo 4b non-thinking defaults, while keeping this repo's length budget.
-LEARNING_RATE=${LEARNING_RATE:-5e-6}
+LEARNING_RATE=${LEARNING_RATE:-1e-6}
 WARMUP_RATIO=${WARMUP_RATIO:-0.05}
 WARMUP_STEPS=${WARMUP_STEPS:-0}
-LR_END=${LR_END:-0}
+LR_END=${LR_END:-1e-7}
 LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-polynomial}
 if [ -z "${LR_SCHEDULER_KWARGS+x}" ]; then
     LR_SCHEDULER_KWARGS="{\"lr_end\":${LR_END},\"power\":1.0}"
@@ -73,6 +71,7 @@ if [ -n "${LR_SCHEDULER_KWARGS}" ]; then
     TRAIN_LR_ARGS+=(--lr_scheduler_kwargs "${LR_SCHEDULER_KWARGS}")
 fi
 
+# Effective warmup steps for logging only (HuggingFace: warmup_steps = floor(max_steps * warmup_ratio)).
 if [ "${WARMUP_STEPS:-0}" != "0" ]; then
     _WU_DESC="warmup_steps=${WARMUP_STEPS}"
 elif [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
@@ -82,16 +81,19 @@ else
     _WU_DESC="no warmup"
 fi
 
+NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.9}
-TEMPERATURE=${TEMPERATURE:-1.1}
-TOP_P=${TOP_P:-0.95}
+# Llama 3.2 Instruct generation_config commonly uses temperature=0.6, top_p=0.9.
+TEMPERATURE=${TEMPERATURE:-0.6}
+TOP_P=${TOP_P:-0.9}
 TOP_K=${TOP_K:-20}
 MIN_P=${MIN_P:-0.0}
 REPETITION_PENALTY=${REPETITION_PENALTY:-1.0}
-PRESENCE_PENALTY=${PRESENCE_PENALTY:-0.0}
+PRESENCE_PENALTY=${PRESENCE_PENALTY:-0.2}
 if [ -z "${GENERATION_KWARGS+x}" ]; then
     GENERATION_KWARGS="{\"presence_penalty\":${PRESENCE_PENALTY}}"
 fi
+MASK_TRUNCATED_COMPLETIONS=${MASK_TRUNCATED_COMPLETIONS:-true}
 TRAIN_CUDA_VISIBLE_DEVICES=${TRAIN_CUDA_VISIBLE_DEVICES:-0}
 GEN_CUDA_VISIBLE_DEVICES=${GEN_CUDA_VISIBLE_DEVICES:-1}
 VLLM_SERVER_HOST=${VLLM_SERVER_HOST:-127.0.0.1}
@@ -99,20 +101,37 @@ VLLM_SERVER_PORT=${VLLM_SERVER_PORT:-8000}
 VLLM_SERVER_BASE_URL=${VLLM_SERVER_BASE_URL:-http://${VLLM_SERVER_HOST}:${VLLM_SERVER_PORT}}
 VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
 VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
+# Keep vLLM serving length aligned with the training budget from the reference script.
 VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-${MAX_LENGTH}}
-VLLM_SYNC_FREQUENCY=${VLLM_SYNC_FREQUENCY:-1}
-SAVE_GENERATION_STEPS=${SAVE_GENERATION_STEPS:-0}
 
-OPSD_LAMBDA=${OPSD_LAMBDA:-1.0}
-OPSD_BETA=${OPSD_BETA:-0}
-JSD_TOKEN_CLIP=${JSD_TOKEN_CLIP:-1e-7}
-TOP_K_LOSS=${TOP_K_LOSS:-0}
-FIXED_TEACHER=${FIXED_TEACHER:-true}
-STUDENT_ENABLE_THINKING=${STUDENT_ENABLE_THINKING:-false}
-TEACHER_ENABLE_THINKING=${TEACHER_ENABLE_THINKING:-false}
-STUDENT_PROMPT_AS_CHAT=${STUDENT_PROMPT_AS_CHAT:-false}
+ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
+TOKEN_GAP_LAMBDA=${TOKEN_GAP_LAMBDA:-1.0}
+TOKEN_GAP_DECAY_STEPS=${TOKEN_GAP_DECAY_STEPS:-0}
+
+ALL_CORRECT_BASE_ADVANTAGE=${ALL_CORRECT_BASE_ADVANTAGE:-1.0}
+ALL_WRONG_BASE_ADVANTAGE=${ALL_WRONG_BASE_ADVANTAGE:--1.0}
+CORRECT_WEIGHT_CLIP_LOW=${CORRECT_WEIGHT_CLIP_LOW:-0.8}
+CORRECT_WEIGHT_CLIP_HIGH=${CORRECT_WEIGHT_CLIP_HIGH:-1.05}
+WRONG_WEIGHT_CLIP_LOW=${WRONG_WEIGHT_CLIP_LOW:-0.95}
+WRONG_WEIGHT_CLIP_HIGH=${WRONG_WEIGHT_CLIP_HIGH:-1.2}
+TEACHER_UPDATE_INTERVAL_STEPS=${TEACHER_UPDATE_INTERVAL_STEPS:-10}
+TEACHER_INCLUDE_REFERENCE_SOLUTION=${TEACHER_INCLUDE_REFERENCE_SOLUTION:-false}
+ADV_CLIP_LOW=${ADV_CLIP_LOW:--1.2}
+ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.2}
+SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
+ANSWER_TOKEN_DOWNWEIGHT=${ANSWER_TOKEN_DOWNWEIGHT:-1.0}
+REWARD_BINARY_THRESHOLD=${REWARD_BINARY_THRESHOLD:-0.5}
+FALLBACK_TAIL_TOKENS=${FALLBACK_TAIL_TOKENS:-8}
+REWARD_FORMAT_PENALTIES=${REWARD_FORMAT_PENALTIES:-false}
+REWARD_NO_EOS_PENALTY=${REWARD_NO_EOS_PENALTY:-0.15}
+REWARD_MULTI_BOXED_PENALTY=${REWARD_MULTI_BOXED_PENALTY:-0.15}
+REWARD_MIN_CONSECUTIVE_BOXED=${REWARD_MIN_CONSECUTIVE_BOXED:-2}
+REWARD_REPEAT_TRIPLET_PENALTY=${REWARD_REPEAT_TRIPLET_PENALTY:-0.0}
+REWARD_REPEAT_TRIPLET_LEV_THRESHOLD=${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD:-0}
 DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-false}
 REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
+DAPO_EPSILON=${DAPO_EPSILON:-0.2}
+DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.28}
 
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"q_proj k_proj v_proj o_proj gate_proj up_proj down_proj"}
 LORA_R=${LORA_R:-64}
@@ -134,18 +153,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[opsd] fixed_teacher=${FIXED_TEACHER} jsd_token_clip=${JSD_TOKEN_CLIP} beta=${OPSD_BETA} top_k_loss=${TOP_K_LOSS}"
+VLLM_SERVE_ARGS=(
+    --model "${MODEL_PATH}"
+    --host "${VLLM_SERVER_HOST}"
+    --port "${VLLM_SERVER_PORT}"
+    --gpu-memory-utilization "${VLLM_GPU_MEM_UTIL}"
+    --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}"
+)
+if [ -n "${VLLM_MAX_MODEL_LEN}" ] && [ "${VLLM_MAX_MODEL_LEN}" != "0" ]; then
+    VLLM_SERVE_ARGS+=(--max-model-len "${VLLM_MAX_MODEL_LEN}")
+fi
+
+echo "[ablation] wrong_path_positive_flip=true (base_adv<0 & g>0 -> positive adv)"
+echo "[ablation] teacher_include_reference_solution=${TEACHER_INCLUDE_REFERENCE_SOLUTION}"
 echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
-echo "[launch] VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN}"
+echo "[launch] VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN} (set 0 to omit --max-model-len)"
 CUDA_VISIBLE_DEVICES="${GEN_CUDA_VISIBLE_DEVICES}" \
 PYTORCH_CUDA_ALLOC_CONF="" \
-trl vllm-serve \
-    --model "${MODEL_PATH}" \
-    --host "${VLLM_SERVER_HOST}" \
-    --port "${VLLM_SERVER_PORT}" \
-    --gpu-memory-utilization "${VLLM_GPU_MEM_UTIL}" \
-    --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}" \
-    --max-model-len "${VLLM_MAX_MODEL_LEN}" \
+trl vllm-serve "${VLLM_SERVE_ARGS[@]}" \
     > "${VLLM_SERVER_LOG}" 2>&1 &
 VLLM_SERVER_PID=$!
 
@@ -160,7 +185,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --num_processes 1 \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --main_process_port "${MAIN_PROCESS_PORT}" \
-    official_opsd_train.py \
+    opsd_train_anchor_strict_split_flip_wrong_boost.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
     --dataset_split train \
@@ -171,21 +196,20 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --use_dapo_raw_prompt "${USE_DAPO_RAW_PROMPT}" \
     "${_MATH_SUFFIX_ARGS[@]}" \
     "${TRAIN_LR_ARGS[@]}" \
-    --max_grad_norm 0.1 \
+    --max_grad_norm 1.0 \
     --per_device_train_batch_size "${PER_DEVICE_BS}" \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --output_dir "${OUTPUT_DIR}" \
     --run_config "${RUN_CONFIG}" \
     --max_steps "${MAX_STEPS}" \
-    --num_generations 1 \
+    --num_generations "${NUM_GENERATIONS}" \
     --max_completion_length "${MAX_COMPLETION_LENGTH}" \
     --save_steps 50 \
     --logging_steps 1 \
-    --attn_implementation "${ATTN_IMPLEMENTATION}" \
+    --attn_implementation sdpa \
     --torch_dtype bfloat16 \
     --max_length "${MAX_LENGTH}" \
-    --max_teacher_prompt_length "${MAX_TEACHER_PROMPT_LENGTH}" \
-    --beta "${OPSD_BETA}" \
+    --beta 0 \
     --use_vllm \
     --vllm_mode server \
     --vllm_server_base_url "${VLLM_SERVER_BASE_URL}" \
@@ -203,16 +227,34 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --min_p "${MIN_P}" \
     --repetition_penalty "${REPETITION_PENALTY}" \
     --generation_extra_kwargs_json "${GENERATION_KWARGS}" \
-    --lmbda "${OPSD_LAMBDA}" \
-    --jsd_token_clip "${JSD_TOKEN_CLIP}" \
-    --top_k_loss "${TOP_K_LOSS}" \
-    --fixed_teacher "${FIXED_TEACHER}" \
-    --student_enable_thinking "${STUDENT_ENABLE_THINKING}" \
-    --teacher_enable_thinking "${TEACHER_ENABLE_THINKING}" \
-    --student_prompt_as_chat "${STUDENT_PROMPT_AS_CHAT}" \
+    --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
+    --token_gap_lambda "${TOKEN_GAP_LAMBDA}" \
+    --token_gap_decay_steps "${TOKEN_GAP_DECAY_STEPS}" \
+    --fixed_teacher false \
+    --teacher_update_interval_steps "${TEACHER_UPDATE_INTERVAL_STEPS}" \
+    --teacher_include_reference_solution "${TEACHER_INCLUDE_REFERENCE_SOLUTION}" \
+    --rollout_filter "${ROLLOUT_FILTER}" \
+    --all_correct_base_advantage "${ALL_CORRECT_BASE_ADVANTAGE}" \
+    --all_wrong_base_advantage "${ALL_WRONG_BASE_ADVANTAGE}" \
+    --correct_weight_clip_low "${CORRECT_WEIGHT_CLIP_LOW}" \
+    --correct_weight_clip_high "${CORRECT_WEIGHT_CLIP_HIGH}" \
+    --wrong_weight_clip_low "${WRONG_WEIGHT_CLIP_LOW}" \
+    --wrong_weight_clip_high "${WRONG_WEIGHT_CLIP_HIGH}" \
+    --adv_clip_low "${ADV_CLIP_LOW}" \
+    --adv_clip_high "${ADV_CLIP_HIGH}" \
+    --suppress_gt_shortcut "${SUPPRESS_GT_SHORTCUT}" \
+    --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
+    --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
+    --fallback_tail_tokens "${FALLBACK_TAIL_TOKENS}" \
+    --reward_format_penalties "${REWARD_FORMAT_PENALTIES}" \
+    --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
+    --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \
+    --reward_min_consecutive_boxed "${REWARD_MIN_CONSECUTIVE_BOXED}" \
+    --reward_repeat_triplet_penalty "${REWARD_REPEAT_TRIPLET_PENALTY}" \
+    --reward_repeat_triplet_levenshtein_threshold "${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD}" \
     --disable_thinking_in_chat_template "${DISABLE_THINKING_IN_CHAT_TEMPLATE}" \
     --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
-    --vllm_sync_frequency "${VLLM_SYNC_FREQUENCY}" \
-    --save_generation_steps "${SAVE_GENERATION_STEPS}" \
+    --epsilon "${DAPO_EPSILON}" \
+    --dapo_epsilon_high "${DAPO_EPSILON_HIGH}" \
     --disable_wandb "${DISABLE_WANDB}" \
     --gradient_checkpointing

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o logs/eval_32k_hmmt25_llama3_2_3b.%j.out
+#SBATCH -o logs/llama_logs/eval_32k_math500_llama3_2_3b.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -16,14 +16,14 @@ if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
     BASE_DIR="${BASE_DIR:-${SLURM_SUBMIT_DIR}}"
 else
     _EVAL_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    BASE_DIR="$(cd "${_EVAL_SCRIPT}/.." && pwd)"
+    BASE_DIR="$(cd "${_EVAL_SCRIPT}/../.." && pwd)"
 fi
 cd "${BASE_DIR}"
 
 source activate anchor
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 set -u
-mkdir -p logs outputs
+mkdir -p logs/llama_logs outputs
 
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -35,12 +35,12 @@ export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 
 model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/llama-3.2-3b-instruct}
 
-datasets_csv=${DATASETS:-hmmt25}
+datasets_csv=${DATASETS:-math500}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-}}
+checkpoint_dir=${CHECKPOINT_DIR:-/gpfs/share/home/2501210611/RLSD/outputs/rlsd_llama3_2_3b_strict_split_flip_wrong_boost_nodecay_no_teacher_ref/job_2367976/checkpoint-300}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
-use_lora=${USE_LORA:-0}
+use_lora=${USE_LORA:-1}
 num_samples=${NUM_SAMPLES:-0}
 val_n=${VAL_N:-16}
 pass_at_k=${PASS_AT_K:-1,4,8,16}
@@ -57,7 +57,7 @@ seed=${SEED:-42}
 tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-1}
 gpu_memory_utilization=${GPU_MEMORY_UTILIZATION:-0.9}
 disable_custom_all_reduce=${DISABLE_CUSTOM_ALL_REDUCE:-1}
-generate_batch_size=${GENERATE_BATCH_SIZE:-16}
+generate_batch_size=${GENERATE_BATCH_SIZE:-64}
 force_base_tokenizer=${FORCE_BASE_TOKENIZER:-1}
 
 stamp=$(date -u +%Y%m%d_%H%M%S)
@@ -66,7 +66,7 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
 else
   run_tag="${stamp}"
 fi
-output_json=${OUTPUT_JSON:-outputs/eval_32k_hmmt25_llama3_2_3b/cot_32k/eval_${run_tag}.json}
+output_json=${OUTPUT_JSON:-outputs/eval_32k_math500_llama3_2_3b/cot_32k/eval_${run_tag}.json}
 
 mkdir -p "$(dirname "${output_json}")"
 echo "[EVAL] model_path=${model_path}"

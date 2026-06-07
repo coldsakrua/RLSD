@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o logs/rlsd_llama3_2_3b_paper.%j.out
+#SBATCH -o logs/llama_logs/rlsd_llama3_2_3b_paper.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -19,7 +19,7 @@ nvidia-smi
 
 BASE_DIR="/gpfs/share/home/2501210611/RLSD"
 cd "${BASE_DIR}"
-mkdir -p logs
+mkdir -p logs/llama_logs
 
 source activate anchor
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"

@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH -o logs/rlrt_llama3_2_3b.%j.out
+#SBATCH -o logs/rlsd_4b_strict_split_flip_wrong_boost_nodecay_no_teacher_ref_fixed_teacher.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n15,gpua800n05,gpua800n04
+
 
 set -eo pipefail
 nvidia-smi
@@ -23,11 +23,11 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset ROCR_VISIBLE_DEVICES
 
-MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/llama-3.2-3b-instruct}
+MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlrt_llama3_2_3b}
-RUN_CONFIG=${RUN_CONFIG:-rlrt_llama3_2_3b}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_strict_split_flip_wrong_boost_nodecay_no_teacher_ref_fixed_teacher}
+RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_strict_split_flip_wrong_boost_nodecay_no_teacher_ref_fixed_teacher}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
@@ -52,22 +52,16 @@ NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUF
 MATH_INSTRUCTION_SUFFIX=${MATH_INSTRUCTION_SUFFIX:-}
 USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-true}
 
-# Paper Table 5 (RLRT): lr=1e-6, weight_decay=0.01, warmup_steps=10, rollout T=1.0,
-#   lambda_init=0.5, epsilon_w=1.0, no lambda decay, current-policy teacher.
-# Where the paper is silent (e.g. LR scheduler), use repo defaults below.
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
-WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
-WARMUP_RATIO=${WARMUP_RATIO:-}
-WARMUP_STEPS=${WARMUP_STEPS:-10}
+WARMUP_RATIO=${WARMUP_RATIO:-0.05}
+WARMUP_STEPS=${WARMUP_STEPS:-0}
 LR_END=${LR_END:-1e-7}
-LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-linear}
-if [ -z "${LR_SCHEDULER_KWARGS+x}" ] && [ "${LR_SCHEDULER_TYPE}" = "polynomial" ]; then
+LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE:-polynomial}
+if [ -z "${LR_SCHEDULER_KWARGS+x}" ]; then
     LR_SCHEDULER_KWARGS="{\"lr_end\":${LR_END},\"power\":1.0}"
-elif [ -z "${LR_SCHEDULER_KWARGS+x}" ]; then
-    LR_SCHEDULER_KWARGS=""
 fi
 
-TRAIN_LR_ARGS=(--learning_rate "${LEARNING_RATE}" --weight_decay "${WEIGHT_DECAY}" --lr_scheduler_type "${LR_SCHEDULER_TYPE}")
+TRAIN_LR_ARGS=(--learning_rate "${LEARNING_RATE}" --lr_scheduler_type "${LR_SCHEDULER_TYPE}")
 if [ "${WARMUP_STEPS:-0}" != "0" ]; then
     TRAIN_LR_ARGS+=(--warmup_steps "${WARMUP_STEPS}")
 elif [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
@@ -89,19 +83,14 @@ fi
 
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.9}
-# Training rollout: paper specifies temperature=1.0 only (eval uses T=0.7, top_p=0.8).
-TEMPERATURE=${TEMPERATURE:-1.0}
-TOP_P=${TOP_P:-1.0}
+TEMPERATURE=${TEMPERATURE:-0.7}
+TOP_P=${TOP_P:-0.95}
 TOP_K=${TOP_K:-20}
 MIN_P=${MIN_P:-0.0}
 REPETITION_PENALTY=${REPETITION_PENALTY:-1.0}
-PRESENCE_PENALTY=${PRESENCE_PENALTY:-0.0}
+PRESENCE_PENALTY=${PRESENCE_PENALTY:-0.2}
 if [ -z "${GENERATION_KWARGS+x}" ]; then
-  if [ "${PRESENCE_PENALTY}" != "0" ] && [ "${PRESENCE_PENALTY}" != "0.0" ]; then
     GENERATION_KWARGS="{\"presence_penalty\":${PRESENCE_PENALTY}}"
-  else
-    GENERATION_KWARGS="{}"
-  fi
 fi
 MASK_TRUNCATED_COMPLETIONS=${MASK_TRUNCATED_COMPLETIONS:-true}
 TRAIN_CUDA_VISIBLE_DEVICES=${TRAIN_CUDA_VISIBLE_DEVICES:-0}
@@ -111,14 +100,10 @@ VLLM_SERVER_PORT=${VLLM_SERVER_PORT:-8000}
 VLLM_SERVER_BASE_URL=${VLLM_SERVER_BASE_URL:-http://${VLLM_SERVER_HOST}:${VLLM_SERVER_PORT}}
 VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
 VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
-VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-${MAX_LENGTH}}
 
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
-TOKEN_GAP_LAMBDA=${TOKEN_GAP_LAMBDA:-0.5}
+TOKEN_GAP_LAMBDA=${TOKEN_GAP_LAMBDA:-1.0}
 TOKEN_GAP_DECAY_STEPS=${TOKEN_GAP_DECAY_STEPS:-0}
-RLRT_WEIGHT_CLIP=${RLRT_WEIGHT_CLIP:-1.0}
-RLRT_DELTA=${RLRT_DELTA:-2.0}
-RLRT_TEACHER_CONTEXT_MODE=${RLRT_TEACHER_CONTEXT_MODE:-successful_rollout}
 
 ALL_CORRECT_BASE_ADVANTAGE=${ALL_CORRECT_BASE_ADVANTAGE:-1.0}
 ALL_WRONG_BASE_ADVANTAGE=${ALL_WRONG_BASE_ADVANTAGE:--1.0}
@@ -126,10 +111,11 @@ CORRECT_WEIGHT_CLIP_LOW=${CORRECT_WEIGHT_CLIP_LOW:-0.8}
 CORRECT_WEIGHT_CLIP_HIGH=${CORRECT_WEIGHT_CLIP_HIGH:-1.05}
 WRONG_WEIGHT_CLIP_LOW=${WRONG_WEIGHT_CLIP_LOW:-0.95}
 WRONG_WEIGHT_CLIP_HIGH=${WRONG_WEIGHT_CLIP_HIGH:-1.2}
+FIXED_TEACHER=${FIXED_TEACHER:-true}
 TEACHER_UPDATE_INTERVAL_STEPS=${TEACHER_UPDATE_INTERVAL_STEPS:-0}
 TEACHER_INCLUDE_REFERENCE_SOLUTION=${TEACHER_INCLUDE_REFERENCE_SOLUTION:-false}
-ADV_CLIP_LOW=${ADV_CLIP_LOW:--1000000000.0}
-ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1000000000.0}
+ADV_CLIP_LOW=${ADV_CLIP_LOW:--1.2}
+ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.2}
 SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
 ANSWER_TOKEN_DOWNWEIGHT=${ANSWER_TOKEN_DOWNWEIGHT:-1.0}
 REWARD_BINARY_THRESHOLD=${REWARD_BINARY_THRESHOLD:-0.5}
@@ -140,7 +126,7 @@ REWARD_MULTI_BOXED_PENALTY=${REWARD_MULTI_BOXED_PENALTY:-0.15}
 REWARD_MIN_CONSECUTIVE_BOXED=${REWARD_MIN_CONSECUTIVE_BOXED:-2}
 REWARD_REPEAT_TRIPLET_PENALTY=${REWARD_REPEAT_TRIPLET_PENALTY:-0.0}
 REWARD_REPEAT_TRIPLET_LEV_THRESHOLD=${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD:-0}
-DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-false}
+DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}
 REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
 DAPO_EPSILON=${DAPO_EPSILON:-0.2}
 DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.28}
@@ -165,10 +151,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[rlrt] lambda=${TOKEN_GAP_LAMBDA} decay_steps=${TOKEN_GAP_DECAY_STEPS} epsilon_w=${RLRT_WEIGHT_CLIP} delta=${RLRT_DELTA}"
-echo "[rlrt] teacher_context_mode=${RLRT_TEACHER_CONTEXT_MODE} teacher_include_reference_solution=${TEACHER_INCLUDE_REFERENCE_SOLUTION}"
+echo "[ablation] wrong_path_positive_flip=true (base_adv<0 & g>0 -> positive adv)"
+echo "[ablation] fixed_teacher=${FIXED_TEACHER} teacher_update_interval_steps=${TEACHER_UPDATE_INTERVAL_STEPS} (teacher=initial base model)"
+echo "[ablation] teacher_include_reference_solution=${TEACHER_INCLUDE_REFERENCE_SOLUTION}"
 echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
-echo "[launch] VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN}"
 CUDA_VISIBLE_DEVICES="${GEN_CUDA_VISIBLE_DEVICES}" \
 PYTORCH_CUDA_ALLOC_CONF="" \
 trl vllm-serve \
@@ -177,7 +163,6 @@ trl vllm-serve \
     --port "${VLLM_SERVER_PORT}" \
     --gpu-memory-utilization "${VLLM_GPU_MEM_UTIL}" \
     --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}" \
-    --max-model-len "${VLLM_MAX_MODEL_LEN}" \
     > "${VLLM_SERVER_LOG}" 2>&1 &
 VLLM_SERVER_PID=$!
 
@@ -185,18 +170,14 @@ _MATH_SUFFIX_ARGS=()
 if [ -n "${MATH_INSTRUCTION_SUFFIX}" ]; then
     _MATH_SUFFIX_ARGS+=(--math_instruction_suffix "${MATH_INSTRUCTION_SUFFIX}")
 fi
-_DAPO_EPS_HIGH_ARGS=()
-if [ -n "${DAPO_EPSILON_HIGH}" ]; then
-    _DAPO_EPS_HIGH_ARGS+=(--dapo_epsilon_high "${DAPO_EPSILON_HIGH}")
-fi
 
-echo "[launch] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES} lr=${LEARNING_RATE} weight_decay=${WEIGHT_DECAY} sched=${LR_SCHEDULER_TYPE} ${_WU_DESC}"
+echo "[launch] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES} lr=${LEARNING_RATE} sched=${LR_SCHEDULER_TYPE} ${_WU_DESC}"
 CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --config_file accelerate.yaml \
     --num_processes 1 \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --main_process_port "${MAIN_PROCESS_PORT}" \
-    rlrt_train_anchor.py \
+    opsd_train_anchor_strict_split_flip_wrong_boost.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
     --dataset_split train \
@@ -241,10 +222,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
     --token_gap_lambda "${TOKEN_GAP_LAMBDA}" \
     --token_gap_decay_steps "${TOKEN_GAP_DECAY_STEPS}" \
-    --rlrt_weight_clip "${RLRT_WEIGHT_CLIP}" \
-    --rlrt_delta "${RLRT_DELTA}" \
-    --rlrt_teacher_context_mode "${RLRT_TEACHER_CONTEXT_MODE}" \
-    --fixed_teacher false \
+    --fixed_teacher "${FIXED_TEACHER}" \
     --teacher_update_interval_steps "${TEACHER_UPDATE_INTERVAL_STEPS}" \
     --teacher_include_reference_solution "${TEACHER_INCLUDE_REFERENCE_SOLUTION}" \
     --rollout_filter "${ROLLOUT_FILTER}" \
@@ -269,6 +247,6 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --disable_thinking_in_chat_template "${DISABLE_THINKING_IN_CHAT_TEMPLATE}" \
     --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
     --epsilon "${DAPO_EPSILON}" \
-    "${_DAPO_EPS_HIGH_ARGS[@]}" \
+    --dapo_epsilon_high "${DAPO_EPSILON_HIGH}" \
     --disable_wandb "${DISABLE_WANDB}" \
     --gradient_checkpointing
