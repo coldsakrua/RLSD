@@ -1,13 +1,12 @@
 #!/bin/bash
-#SBATCH -o logs/opsd_8b_only.%j.out
+#SBATCH -o logs/opsd_1_7b_pure.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n15,gpua800n26,gpua800n07
-
+#SBATCH --exclude=gpua800n03,gpua800n07
 set -eo pipefail
 nvidia-smi
 
@@ -23,13 +22,13 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset ROCR_VISIBLE_DEVICES
 
-MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-8b}
+MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-1.7b}
 # Raw DAPO: data/dapo/dapo-math-17k.parquet ; preprocess once: bash scripts/run_preprocess_dapo_math.sh
 # Then point DATASET_PATH at data/dapo/dapo-math-17k-standard-boxed.parquet and set NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=false.
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/opsd_8b_pure}
-RUN_CONFIG=${RUN_CONFIG:-opsd_pure_8b}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/opsd_1_7b_pure}
+RUN_CONFIG=${RUN_CONFIG:-opsd_pure_1_7b}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
