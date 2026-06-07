@@ -1,19 +1,20 @@
 #!/bin/bash
-#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/cast_teacher50_4b_256_noflip_withgap005.%j.out
+#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/cast_teacher10_4b_full_noflip_nogap005.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n07,gpua800n09,gpua800n10,gpua800n11
+#SBATCH --exclude=gpua800n07,gpua800n23
 
 set -eo pipefail
 
-# Periodic internal-teacher LoRA snapshots (not EMA):
-#   steps 1-50: teacher = base model (zero LoRA)
-#   steps 50, 100, 150, ...: snapshot student LoRA; steps 51-100 use step-50 snapshot, etc.
-RUN_CONFIG="${RUN_CONFIG:-cast_teacher50_4b_256_noflip_withgap005}"
+# Variant of cast_teacher50_4b_full_noflip_nogap005.sh with teacher snapshot every 10 steps:
+#   step 1: skip teacher logprob
+#   steps 2-10: teacher = base model (zero LoRA)
+#   step 10: snapshot student LoRA; steps 11-20 use step-10 snapshot; step 20 refreshes; and so on.
+RUN_CONFIG="${RUN_CONFIG:-cast_teacher10_4b_full_noflip_nogap005}"
 ADV_ESTIMATOR="${ADV_ESTIMATOR:-rlsd_strict_split_noflip}"
 REWARD_FUNCTION_NAME="${REWARD_FUNCTION_NAME:-compute_score}"
 TOKEN_GAP_LAMBDA="${TOKEN_GAP_LAMBDA:-0.5}"
@@ -26,8 +27,8 @@ INTERNAL_TEACHER_LOGPROB="${INTERNAL_TEACHER_LOGPROB:-true}"
 INTERNAL_TEACHER_STRICT="${INTERNAL_TEACHER_STRICT:-true}"
 INTERNAL_TEACHER_SNAPSHOT_MODE="${INTERNAL_TEACHER_SNAPSHOT_MODE:-true}"
 INTERNAL_TEACHER_START_STEP="${INTERNAL_TEACHER_START_STEP:-2}"
-INTERNAL_TEACHER_BASE_UNTIL_STEP="${INTERNAL_TEACHER_BASE_UNTIL_STEP:-50}"
-INTERNAL_TEACHER_SNAPSHOT_INTERVAL="${INTERNAL_TEACHER_SNAPSHOT_INTERVAL:-50}"
+INTERNAL_TEACHER_BASE_UNTIL_STEP="${INTERNAL_TEACHER_BASE_UNTIL_STEP:-10}"
+INTERNAL_TEACHER_SNAPSHOT_INTERVAL="${INTERNAL_TEACHER_SNAPSHOT_INTERVAL:-10}"
 
 ALL_CORRECT_BASE_ADVANTAGE="${ALL_CORRECT_BASE_ADVANTAGE:-1.0}"
 ALL_WRONG_BASE_ADVANTAGE="${ALL_WRONG_BASE_ADVANTAGE:--1.0}"
@@ -125,7 +126,10 @@ MAX_LENGTH="$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))"
 export RLSD_MAX_SEQ_LEN="${MAX_LENGTH}"
 export RLSD_MAX_RESPONSE_LENGTH="${MAX_COMPLETION_LENGTH}"
 export RLSD_MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH}"
-TEACHER_SHAPING_LENGTH_CAP="${TEACHER_SHAPING_LENGTH_CAP:-256}"
+# Full-response teacher shaping (default 256 in cast_ema_4b_256_noflip.sh).
+TEACHER_SHAPING_LENGTH_CAP="${TEACHER_SHAPING_LENGTH_CAP:-${MAX_COMPLETION_LENGTH}}"
+# 0 = no truncation when external teacher logprobs are used.
+TEACHER_LOGPROB_RESPONSE_LENGTH_CAP="${TEACHER_LOGPROB_RESPONSE_LENGTH_CAP:-0}"
 
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.9}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
@@ -149,8 +153,8 @@ KL_LOSS_COEF="${KL_LOSS_COEF:-0.0}"
 POSITIVE_ADV_LENGTH_CAP="${POSITIVE_ADV_LENGTH_CAP:-0}"
 LENGTH_PENALTY_START="${LENGTH_PENALTY_START:-0}"
 LENGTH_PENALTY="${LENGTH_PENALTY:-0.0}"
-TOKEN_RATIO_DEADBAND_LOW="${TOKEN_RATIO_DEADBAND_LOW:-0.95}"
-TOKEN_RATIO_DEADBAND_HIGH="${TOKEN_RATIO_DEADBAND_HIGH:-1.05}"
+# TOKEN_RATIO_DEADBAND_LOW="${TOKEN_RATIO_DEADBAND_LOW:-0.95}"
+# TOKEN_RATIO_DEADBAND_HIGH="${TOKEN_RATIO_DEADBAND_HIGH:-1.05}"
 DISTILLATION_TOPK="${DISTILLATION_TOPK:-32}"
 DISTILLATION_USE_TASK_REWARDS="${DISTILLATION_USE_TASK_REWARDS:-true}"
 USE_POLICY_GRAD_DISTILL="${USE_POLICY_GRAD_DISTILL:-false}"
@@ -194,13 +198,14 @@ VERL_ARGS=(
     "++algorithm.rlsd.official_teacher_prompt=${OFFICIAL_TEACHER_PROMPT}"
     "++algorithm.rlsd.max_teacher_prompt_length=${MAX_PROMPT_LENGTH}"
     "++algorithm.rlsd.teacher_shaping_length_cap=${TEACHER_SHAPING_LENGTH_CAP}"
+    "++algorithm.rlsd.teacher_logprob_response_length_cap=${TEACHER_LOGPROB_RESPONSE_LENGTH_CAP}"
     "++algorithm.rlsd.teacher_ema_enabled=false"
     "++algorithm.rlsd.wrong_boost=false"
     "++algorithm.rlsd.positive_adv_length_cap=${POSITIVE_ADV_LENGTH_CAP}"
     "++algorithm.rlsd.length_penalty_start=${LENGTH_PENALTY_START}"
     "++algorithm.rlsd.length_penalty=${LENGTH_PENALTY}"
-    "++algorithm.rlsd.token_ratio_deadband_low=${TOKEN_RATIO_DEADBAND_LOW}"
-    "++algorithm.rlsd.token_ratio_deadband_high=${TOKEN_RATIO_DEADBAND_HIGH}"
+    # "++algorithm.rlsd.token_ratio_deadband_low=${TOKEN_RATIO_DEADBAND_LOW}"
+    # "++algorithm.rlsd.token_ratio_deadband_high=${TOKEN_RATIO_DEADBAND_HIGH}"
     "++algorithm.rlsd.all_correct_base_advantage=${ALL_CORRECT_BASE_ADVANTAGE}"
     "++algorithm.rlsd.all_wrong_base_advantage=${ALL_WRONG_BASE_ADVANTAGE}"
     "++algorithm.rlsd.correct_weight_clip_low=${CORRECT_WEIGHT_CLIP_LOW}"

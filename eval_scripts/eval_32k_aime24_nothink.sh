@@ -3,10 +3,10 @@
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=24:00:00
-#SBATCH --exclude=gpua800n04,gpua800n24
+
 
 set -eo pipefail
 nvidia-smi
@@ -27,7 +27,7 @@ mkdir -p logs outputs
 
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export VLLM_HOST_IP=127.0.0.1
 export TORCH_CUDA_ARCH_LIST=8.0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -37,7 +37,7 @@ model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/q
 datasets_csv=${DATASETS:-aime24,aime26}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
-checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/grpo_4b_base/job_2332564/global_step_300/actor/lora_adapter}}
+checkpoint_dir=${CHECKPOINT_DIR:-${LORA_PATH:-/gpfs/share/home/2501210611/RLSD/outputs/cast_teacher_4b_full_noflip_nogap005/job_2364720/global_step_300/actor/lora_adapter}}
 max_lora_rank=${MAX_LORA_RANK:-${VLLM_MAX_LORA_RANK:-64}}
 use_lora=${USE_LORA:-1}
 num_samples=${NUM_SAMPLES:-0}
@@ -50,7 +50,7 @@ top_k=${TOP_K:-20}
 min_p=${MIN_P:-0.0}
 presence_penalty=${PRESENCE_PENALTY:-0.0}
 seed=${SEED:-42}
-tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-2}
+tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-1}
 gpu_memory_utilization=${GPU_MEMORY_UTILIZATION:-0.9}
 disable_custom_all_reduce=${DISABLE_CUSTOM_ALL_REDUCE:-1}
 max_model_len=${MAX_MODEL_LEN:-40960}

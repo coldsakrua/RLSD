@@ -454,6 +454,35 @@ def _internal_teacher_snapshot_mode() -> bool:
     return _env_truthy("RLSD_INTERNAL_TEACHER_SNAPSHOT_MODE", False)
 
 
+def _internal_teacher_temperature() -> float | None:
+    raw = os.environ.get("RLSD_INTERNAL_TEACHER_TEMPERATURE")
+    if not str(raw or "").strip():
+        return None
+    try:
+        temp = float(raw)
+    except ValueError:
+        return None
+    return temp if temp > 0 else None
+
+
+def _run_teacher_logprob_forward(worker: Any, teacher_data: Any, compute_fn: Any) -> Any:
+    """Recompute teacher logprobs, optionally at a different temperature than rollout."""
+    teacher_temp = _internal_teacher_temperature()
+    if teacher_temp is None:
+        return compute_fn(worker, teacher_data)
+    config = getattr(worker, "config", None)
+    rollout = getattr(config, "rollout", None) if config is not None else None
+    if rollout is None:
+        return compute_fn(worker, teacher_data)
+    old_temp = getattr(rollout, "temperature", None)
+    try:
+        rollout.temperature = teacher_temp
+        return compute_fn(worker, teacher_data)
+    finally:
+        if old_temp is not None:
+            rollout.temperature = old_temp
+
+
 def _should_compute_internal_teacher_logprobs() -> bool:
     if not _env_truthy("RLSD_INTERNAL_TEACHER_LOGPROB", False):
         return False
@@ -840,7 +869,7 @@ def _compute_internal_teacher_logprobs(worker: Any, data: Any, compute_fn: Any =
             if callable(infer_batch):
                 teacher_output = infer_batch(teacher_data)
             elif compute_fn is not None:
-                teacher_output = compute_fn(worker, teacher_data)
+                teacher_output = _run_teacher_logprob_forward(worker, teacher_data, compute_fn)
             else:
                 return None
         finally:
