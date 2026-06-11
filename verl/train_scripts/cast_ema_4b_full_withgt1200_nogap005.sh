@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/cast_ema_4b_full_withgt1200_nogap005.%j.out
+#SBATCH -o /gpfs/share/home/2501210611/RLSD/verl_logs/train/cast_ema_4b_full_withgt1200_nogap005.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -94,7 +94,7 @@ export MODEL_PATH
 DATASET_PATH="${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}"
 VAL_DATASET_PATH="${VAL_DATASET_PATH:-${DATASET_PATH}}"
 DATASET_CACHE_DIR="${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-${BASE_DIR}/outputs/${RUN_CONFIG}}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${BASE_DIR}/verl_outputs/${RUN_CONFIG}}"
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/job_${JOB_TAG}}"
 # Per-step rollout snap dumps to ${OUTPUT_DIR}/rollouts/{step}.jsonl (8 samples by default).
