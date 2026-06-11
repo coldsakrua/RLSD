@@ -70,9 +70,57 @@ def max_seq_len_from_model_config(model_path: str) -> Optional[int]:
         m = getattr(cfg, "max_position_embeddings", None)
         if m is None:
             m = getattr(cfg, "model_max_length", None)
+        if m is None:
+            text_cfg = getattr(cfg, "text_config", None)
+            if text_cfg is not None:
+                m = getattr(text_cfg, "max_position_embeddings", None)
         return int(m) if m is not None else None
     except Exception:
         return None
+
+
+def _is_gemma3_model(model_path: str) -> bool:
+    p = str(model_path).lower()
+    if "gemma-3" in p or "gemma3" in p:
+        return True
+    try:
+        cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        mt = getattr(cfg, "model_type", "")
+        if mt in ("gemma3", "gemma3_text"):
+            return True
+        text_cfg = getattr(cfg, "text_config", None)
+        if text_cfg is not None and getattr(text_cfg, "model_type", "") == "gemma3_text":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _math_user_suffix(eval_type: str, gemma3: bool) -> str:
+    if eval_type == "mcq":
+        if gemma3:
+            return (
+                "\n\nProvide the final answer as a single capital letter "
+                "(A, B, C, ...), wrapped in \\boxed{}."
+            )
+        return (
+            "\n\nPlease reason step by step and provide the final answer as a single capital letter "
+            "(A, B, C, ...), wrapped in \\boxed{}."
+        )
+    if gemma3:
+        return "\n\nSolve the problem and put your final answer within \\boxed{}."
+    return "\n\nPlease reason step by step, and put your final answer within \\boxed{}."
+
+
+def _apply_chat_prompt(tokenizer: Any, messages: List[Dict[str, str]], enable_thinking: bool) -> str:
+    kwargs: Dict[str, Any] = {"tokenize": False, "add_generation_prompt": True}
+    if enable_thinking:
+        try:
+            kwargs["enable_thinking"] = True
+            return tokenizer.apply_chat_template(messages, **kwargs)
+        except TypeError:
+            kwargs.pop("enable_thinking", None)
+    return tokenizer.apply_chat_template(messages, **kwargs)
 
 
 def extract_boxed_answer(text: str) -> Optional[str]:
@@ -97,6 +145,42 @@ def extract_boxed_answer(text: str) -> Optional[str]:
     if boxed_str.startswith("\\boxed{") and boxed_str.endswith("}"):
         return boxed_str[7:-1].strip()
     return None
+
+
+_RELAXED_MATH_ANSWER_PATTERNS = (
+    r"[Tt]he answer is:?\s*\$([^$]+)\$",
+    r"[Tt]he answer is:?\s*\\boxed\{([^}]+)\}",
+    r"[Tt]he answer is:?\s*(\\frac\{[^}]+\}\{[^}]+\})",
+    r"[Tt]he answer is:?\s*([+-]?\d+(?:\.\d+)?(?:/\d+)?)",
+    r"[Ff]inal answer:?\s*\$([^$]+)\$",
+    r"[Ff]inal answer:?\s*\\boxed\{([^}]+)\}",
+    r"答案是:?\s*\$([^$]+)\$",
+    r"答案是:?\s*\\boxed\{([^}]+)\}",
+    r"答案是:?\s*(\d+)",
+)
+
+
+def extract_relaxed_math_answer(text: str) -> Optional[str]:
+    """Prefer \\boxed{}; fall back to DeepSeek-style 'The answer is: ...' phrases."""
+    if not text:
+        return None
+    boxed = extract_boxed_answer(text)
+    if boxed:
+        return boxed
+    best: Optional[str] = None
+    best_pos = -1
+    for pat in _RELAXED_MATH_ANSWER_PATTERNS:
+        for m in re.finditer(pat, text):
+            if m.start() >= best_pos:
+                best_pos = m.start()
+                best = m.group(1).strip()
+    return best
+
+
+def extract_math_answer(text: str, *, relaxed: bool = False) -> Optional[str]:
+    if relaxed:
+        return extract_relaxed_math_answer(text)
+    return extract_boxed_answer(text)
 
 
 def grade_answer(predicted: Optional[str], ground_truth: str) -> bool:
@@ -433,6 +517,8 @@ def load_problem_answer_parquet_examples(path: Path, limit: Optional[int]) -> Li
         for i, (pr, ans) in enumerate(zip(problems, answers)):
             problem = str(pr).strip() if pr is not None else ""
             gt = str(ans).strip() if ans is not None else ""
+            if text_col == "question" and "####" in gt:
+                gt = _extract_gsm8k_final_answer(gt)
             if not problem or not gt:
                 continue
             if ids is not None:
@@ -672,7 +758,8 @@ for _aliases, _rel in (
     (("math500", "math-500"), "MATH-500/test.parquet"),
     (("minerva",), "Minerva/test.parquet"),
     (("olympiad", "olympiad-bench", "olympiad_bench"), "Olympiad-Bench/test.parquet"),
-    (("gsm8k",), "gsm8k/socratic/test-00000-of-00001.parquet"),
+    (("gsm8k", "gsm8k-main"), "gsm8k/main/test-00000-of-00001.parquet"),
+    (("gsm8k-socratic",), "gsm8k/socratic/test-00000-of-00001.parquet"),
     (("mmlu-pro", "mmlu_pro", "mmlupro"), "mmlu-pro"),
 ):
     for _a in _aliases:
@@ -722,12 +809,15 @@ def _completion_token_count(
     token_ids: Optional[List[int]],
     tokenizer: Any,
 ) -> int:
-    """Return completion length in tokens (prefer vLLM token_ids over re-tokenizing text)."""
-    if token_ids:
-        return len(token_ids)
-    if not text:
-        return 0
-    return len(tokenizer.encode(text, add_special_tokens=False))
+    """Return completion length in tokens (prefer decoded text when vLLM token_ids look padded)."""
+    text_count = len(tokenizer.encode(text, add_special_tokens=False)) if text else 0
+    if not token_ids:
+        return text_count
+    ids_count = len(token_ids)
+    # vLLM can return padded/incorrect token_ids for some models (e.g. Gemma 3).
+    if text and ids_count > max(text_count + 128, text_count * 2):
+        return text_count
+    return ids_count
 
 
 def _avg_output_tokens(rows: List[Dict[str, Any]]) -> float:
@@ -875,7 +965,30 @@ def main() -> None:
     )
     parser.add_argument("--output-json", type=str, default="", help="Summary JSON path (not needed for --list-datasets).")
     parser.add_argument("--num-samples", type=int, default=0, help="0 = use all rows")
-    parser.add_argument("--max-new-tokens", type=int, default=0, help="0 = auto by mode (thinking=38912, non-thinking=32768)")
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=0,
+        help="0 = auto (Gemma3=8192, thinking=38912, else 32768)",
+    )
+    parser.add_argument(
+        "--fill-context",
+        action="store_true",
+        default=False,
+        help=(
+            "Set max_new_tokens = max_model_len - longest prompt length so prompt+completion "
+            "fits in context (e.g. DeepSeek-Math 4096)."
+        ),
+    )
+    parser.add_argument(
+        "--relaxed-answer-extraction",
+        action="store_true",
+        default=False,
+        help=(
+            "For boxed_math: accept \\boxed{} or fallback phrases such as "
+            "'The answer is: $...$' (DeepSeek-Math style)."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=-1.0, help="<0 = auto by mode (thinking=0.6, non-thinking=0.7)")
     parser.add_argument("--top-p", type=float, default=-1.0, help="<0 = auto by mode (thinking=0.95, non-thinking=0.8)")
     parser.add_argument("--top-k", type=int, default=20, help="Set to 20 per Qwen3 official recommendation.")
@@ -902,7 +1015,7 @@ def main() -> None:
         "--max-model-len",
         type=int,
         default=0,
-        help="0 = auto (40960 if thinking else 32768)",
+        help="0 = auto (max_prompt + max_new_tokens + 128)",
     )
     parser.add_argument("--enforce-eager", action="store_true", default=False)
     parser.add_argument(
@@ -1037,25 +1150,78 @@ def main() -> None:
     if not examples:
         raise RuntimeError("No examples loaded; check --data-path and format.")
 
-    max_model_len = args.max_model_len
-    if max_model_len <= 0:
-        max_model_len = 40960 if args.enable_thinking else 32768
-    max_new_tokens = args.max_new_tokens if args.max_new_tokens > 0 else (38912 if args.enable_thinking else 32768)
-    temperature = args.temperature if args.temperature >= 0 else (0.6 if args.enable_thinking else 0.7)
-    top_p = args.top_p if args.top_p >= 0 else (0.95 if args.enable_thinking else 0.8)
-    top_k = max(args.top_k, 0)
-    min_p = max(args.min_p, 0.0)
-    presence_penalty = args.presence_penalty
-
-    print(f"[eval] total {len(examples)} problems from {len(resolved_paths)} file(s)")
-    print(f"[eval] math_verify={'yes' if _HAS_MATH_VERIFY else 'no'}, thinking={args.enable_thinking}")
-
     lora_dir_cli = resolve_user_lora_dir(args.lora_arg)
     vllm_model_path, lora_dir = resolve_vllm_base_and_lora(
         args.model_path,
         str(lora_dir_cli) if lora_dir_cli is not None else None,
     )
     lora_dir_str = str(lora_dir) if lora_dir is not None else None
+    is_gemma3 = _is_gemma3_model(vllm_model_path)
+    enable_thinking = bool(args.enable_thinking) and not is_gemma3
+    if is_gemma3 and args.enable_thinking:
+        print(
+            "[eval] Gemma 3 has no enable_thinking chat-template switch; using thinking=False",
+            flush=True,
+        )
+
+    max_new_tokens = (
+        args.max_new_tokens
+        if args.max_new_tokens > 0
+        else (38912 if enable_thinking else (8192 if is_gemma3 else 32768))
+    )
+    temperature = args.temperature if args.temperature >= 0 else (0.6 if enable_thinking else 0.7)
+    top_p = args.top_p if args.top_p >= 0 else (0.95 if enable_thinking else 0.8)
+    top_k = max(args.top_k, 0)
+    min_p = max(args.min_p, 0.0)
+    presence_penalty = args.presence_penalty
+
+    print(f"[eval] total {len(examples)} problems from {len(resolved_paths)} file(s)")
+    print(f"[eval] math_verify={'yes' if _HAS_MATH_VERIFY else 'no'}, thinking={enable_thinking}")
+
+    tokenizer_src = vllm_model_path
+    if (
+        not args.force_base_tokenizer
+        and lora_dir is not None
+        and (lora_dir / "tokenizer_config.json").is_file()
+    ):
+        tokenizer_src = str(lora_dir.resolve())
+    print(f"[eval] tokenizer_source={tokenizer_src}")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_src, trust_remote_code=True)
+
+    all_prompts: List[str] = []
+    for ex in examples:
+        eval_type = str(ex.get("eval_type", "boxed_math"))
+        user_suffix = _math_user_suffix(eval_type, is_gemma3)
+        messages = [{"role": "user", "content": ex["problem"] + user_suffix}]
+        all_prompts.append(_apply_chat_prompt(tokenizer, messages, enable_thinking))
+
+    prompt_lens = [len(tokenizer.encode(p, add_special_tokens=False)) for p in all_prompts]
+    max_prompt_tokens = max(prompt_lens) if prompt_lens else 0
+
+    max_model_len = args.max_model_len
+    if args.fill_context:
+        if max_model_len <= 0:
+            raise ValueError(
+                "--fill-context requires --max-model-len > 0 so generation can fill remaining context."
+            )
+        max_new_tokens = max(1, max_model_len - max_prompt_tokens)
+        print(
+            f"[eval] fill-context: max_prompt_tokens={max_prompt_tokens}, "
+            f"max_model_len={max_model_len} -> max_new_tokens={max_new_tokens}",
+            flush=True,
+        )
+    elif max_model_len <= 0:
+        max_model_len = max_prompt_tokens + max_new_tokens + 128
+        print(
+            f"[eval] auto max_model_len={max_model_len} "
+            f"(max_prompt={max_prompt_tokens} + max_new_tokens={max_new_tokens} + 128)",
+            flush=True,
+        )
+    elif max_model_len < max_prompt_tokens + max_new_tokens:
+        raise ValueError(
+            f"max_model_len={max_model_len} is smaller than prompt+generation budget "
+            f"({max_prompt_tokens}+{max_new_tokens})."
+        )
 
     max_lora_rank_cli = args.max_lora_rank
     if lora_dir is not None and _adapter_dir_has_weights(lora_dir):
@@ -1080,6 +1246,12 @@ def main() -> None:
     if cfg_max is not None and max_model_len > cfg_max:
         print(f"[eval] capping max_model_len {max_model_len} -> {cfg_max} (base model max_position_embeddings)")
         max_model_len = cfg_max
+        if args.fill_context:
+            max_new_tokens = max(1, max_model_len - max_prompt_tokens)
+            print(
+                f"[eval] fill-context (after max_model_len cap): max_new_tokens={max_new_tokens}",
+                flush=True,
+            )
 
     llm = build_llm(
         vllm_model_path,
@@ -1092,16 +1264,6 @@ def main() -> None:
         max_lora_rank,
     )
 
-    tokenizer_src = vllm_model_path
-    if (
-        not args.force_base_tokenizer
-        and lora_dir is not None
-        and (lora_dir / "tokenizer_config.json").is_file()
-    ):
-        tokenizer_src = str(lora_dir.resolve())
-    print(f"[eval] tokenizer_source={tokenizer_src}")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_src, trust_remote_code=True)
-
     lora_request = None
     if lora_dir is not None and _adapter_dir_has_weights(lora_dir):
         try:
@@ -1111,29 +1273,6 @@ def main() -> None:
             print(f"[eval] LoRARequest -> {lora_dir}")
         except Exception as e:
             print(f"[warn] LoRA disabled: {e}")
-
-    all_prompts: List[str] = []
-    for ex in examples:
-        eval_type = str(ex.get("eval_type", "boxed_math"))
-        if eval_type == "mcq":
-            user_suffix = (
-                "\n\nPlease reason step by step and provide the final answer as a single capital letter "
-                "(A, B, C, ...), wrapped in \\boxed{}."
-            )
-        else:
-            user_suffix = "\n\nPlease reason step by step, and put your final answer within \\boxed{}."
-        messages = [{"role": "user", "content": ex["problem"] + user_suffix}]
-        kwargs = {
-            "tokenize": False,
-            "add_generation_prompt": True,
-        }
-        try:
-            kwargs["enable_thinking"] = args.enable_thinking
-            text = tokenizer.apply_chat_template(messages, **kwargs)
-        except TypeError:
-            kwargs.pop("enable_thinking", None)
-            text = tokenizer.apply_chat_template(messages, **kwargs)
-        all_prompts.append(text)
 
     sp_kw: Dict[str, Any] = {
         "temperature": temperature,
@@ -1218,11 +1357,11 @@ def main() -> None:
                     gt_choice = str(ex.get("ground_truth_choice", ex["ground_truth"])).upper().strip()
                     ok = bool(pred is not None and pred.upper() == gt_choice)
                 else:
-                    pred = extract_boxed_answer(gen)
+                    pred = extract_math_answer(gen, relaxed=args.relaxed_answer_extraction)
                     formatted = pred is not None
                     ok = grade_answer(pred, gt)
                 if pred is None:
-                    preds.append("[no boxed]")
+                    preds.append("[no answer]" if args.relaxed_answer_extraction else "[no boxed]")
                 else:
                     preds.append(pred)
                 correct_flags.append(ok)
@@ -1325,7 +1464,9 @@ def main() -> None:
             "data_paths": [str(p) for p in resolved_paths],
             "dataset_args": list(args.dataset) if args.dataset else [],
             "data_format": args.data_format,
-            "enable_thinking": args.enable_thinking,
+            "enable_thinking": enable_thinking,
+            "fill_context": args.fill_context,
+            "relaxed_answer_extraction": args.relaxed_answer_extraction,
             "temperature": temperature,
             "top_p": top_p,
             "top_k": top_k,

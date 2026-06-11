@@ -167,6 +167,83 @@ def _pick_key(candidates: Iterable[str], columns: Iterable[str]) -> Optional[str
     return None
 
 
+def extract_gsm8k_final_answer(answer_text: str) -> str:
+    """
+    Extract the final GSM8K answer.
+    Typical format ends with: ``#### 72``
+    """
+    text = str(answer_text or "").strip()
+    if not text:
+        return ""
+    m = re.search(r"####\s*(.+?)\s*$", text, flags=re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def _looks_like_gsm8k_hf_dir(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and (path / "dataset_infos.json").is_file()
+        and (path / "main").is_dir()
+    )
+
+
+def _infer_gsm8k_config(path: Path) -> str:
+    path_str = str(path).lower()
+    if "socratic" in path_str:
+        return "socratic"
+    return "main"
+
+
+def _looks_like_gsm8k_schema(columns: Iterable[str]) -> bool:
+    col_set = set(columns)
+    return "question" in col_set and "answer" in col_set
+
+
+def _format_gsm8k_prompt(
+    question: str,
+    *,
+    suffix: str = DEFAULT_MATH_INSTRUCTION_SUFFIX,
+) -> str:
+    q = str(question or "").strip()
+    if not q:
+        return ""
+    if _already_has_standard_suffix(q):
+        return q
+    return f"{q}{suffix or DEFAULT_MATH_INSTRUCTION_SUFFIX}"
+
+
+def _load_gsm8k_parquet_dataset(path: Path, *, split: str, config: str) -> Dataset:
+    config_dir = path / config
+    if not config_dir.is_dir():
+        raise FileNotFoundError(
+            f"GSM8K config directory not found: {config_dir} (expected one of main, socratic)."
+        )
+    shards = sorted(config_dir.glob(f"{split}-*.parquet"))
+    if not shards:
+        raise FileNotFoundError(
+            f"No GSM8K parquet shards for config={config!r}, split={split!r} under {path}."
+        )
+    data_files = {split: [str(shard) for shard in shards]}
+    return load_dataset("parquet", data_files=data_files, split=split)
+
+
+def _normalize_gsm8k_dataset(ds: Dataset) -> Dataset:
+    def _normalize_gsm8k(row):
+        row["prompt"] = _format_gsm8k_prompt(str(row.get("question", "")))
+        row["solution"] = extract_gsm8k_final_answer(str(row.get("answer", "")))
+        return row
+
+    ds = ds.map(_normalize_gsm8k, desc="GSM8K: format prompt + extract #### final answer")
+    ds = ds.filter(
+        lambda row: _non_empty_text(row["prompt"]) and _non_empty_text(row["solution"]),
+        desc="Filtering empty GSM8K prompt/solution rows",
+    )
+    return ds
+
+
 def _resolve_data_file(dataset_path: str, split: str) -> Path:
     path = Path(dataset_path)
     if path.is_file():
@@ -291,7 +368,14 @@ def load_rlsd_dataset(
     split: str = "train",
     *,
     normalize_dapo_prompt: bool = True,
+    gsm8k_config: Optional[str] = None,
 ) -> Dataset:
+    path = Path(dataset_path)
+    if path.is_dir() and _looks_like_gsm8k_hf_dir(path):
+        config = gsm8k_config or _infer_gsm8k_config(path)
+        ds = _load_gsm8k_parquet_dataset(path, split=split, config=config)
+        return _normalize_gsm8k_dataset(ds)
+
     data_file = _resolve_data_file(dataset_path, split)
     ds = _load_single_file(data_file, split=split)
 
@@ -326,6 +410,9 @@ def load_rlsd_dataset(
             _desc = "DAPO schema: extract solution from reward_model.ground_truth + keep raw prompt"
         ds = ds.map(_normalize_dapo, desc=_desc)
         return ds
+
+    if _looks_like_gsm8k_schema(ds.column_names):
+        return _normalize_gsm8k_dataset(ds)
 
     prompt_key = _pick_key(_PROMPT_KEYS, ds.column_names)
     solution_key = _pick_key(_SOLUTION_KEYS, ds.column_names)

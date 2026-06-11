@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n15,gpua800n05,gpua800n04
+#SBATCH --exclude=gpua800n03,gpua800n26,gpua800n14,gpua800n24
 
 set -eo pipefail
 nvidia-smi
@@ -24,7 +24,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset ROCR_VISIBLE_DEVICES
 
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/deepseek-math-7b-rl}
-DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
+DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/gsm8k}
+DATASET_SPLIT=${DATASET_SPLIT:-train}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
 OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlrt_deepseek_math_7b_rl}
 RUN_CONFIG=${RUN_CONFIG:-rlrt_deepseek_math_7b_rl}
@@ -40,17 +41,18 @@ mkdir -p "${WANDB_DATA_DIR}"
 
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
-PER_DEVICE_BS=${PER_DEVICE_BS:-2}
-MAX_STEPS=${MAX_STEPS:-300}
-MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
-# Keep enough prompt budget: trainer computes max_prompt_length = max_length - max_completion_length.
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-MAX_LENGTH=$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))
+PER_DEVICE_BS=${PER_DEVICE_BS:-8}
+MAX_STEPS=${MAX_STEPS:-1200}
+# DeepSeek-Math context: prompt + completion <= 4096 (https://github.com/deepseek-ai/DeepSeek-Math)
+MODEL_MAX_LENGTH=${MODEL_MAX_LENGTH:-4096}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-256}
+MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-$((MODEL_MAX_LENGTH - MAX_PROMPT_LENGTH))}
+MAX_LENGTH=${MAX_LENGTH:-${MODEL_MAX_LENGTH}}
 PROMPT_PREFIX=${PROMPT_PREFIX:-}
 PROMPT_SUFFIX=${PROMPT_SUFFIX:-}
 NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX:-false}
 MATH_INSTRUCTION_SUFFIX=${MATH_INSTRUCTION_SUFFIX:-}
-USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-true}
+USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-false}
 
 # Paper Table 5 (RLRT): lr=1e-6, weight_decay=0.01, warmup_steps=10, rollout T=1.0,
 #   lambda_init=0.5, epsilon_w=1.0, no lambda decay, current-policy teacher.
@@ -140,7 +142,8 @@ REWARD_MULTI_BOXED_PENALTY=${REWARD_MULTI_BOXED_PENALTY:-0.15}
 REWARD_MIN_CONSECUTIVE_BOXED=${REWARD_MIN_CONSECUTIVE_BOXED:-2}
 REWARD_REPEAT_TRIPLET_PENALTY=${REWARD_REPEAT_TRIPLET_PENALTY:-0.0}
 REWARD_REPEAT_TRIPLET_LEV_THRESHOLD=${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD:-0}
-DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-false}
+DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}
+RELAXED_ANSWER_EXTRACTION=${RELAXED_ANSWER_EXTRACTION:-true}
 REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
 DAPO_EPSILON=${DAPO_EPSILON:-0.2}
 DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.28}
@@ -199,7 +202,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     rlrt_train_anchor.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
-    --dataset_split train \
+    --dataset_split "${DATASET_SPLIT}" \
     --dataset_cache_dir "${DATASET_CACHE_DIR}" \
     --prompt_prefix "${PROMPT_PREFIX}" \
     --prompt_suffix "${PROMPT_SUFFIX}" \
@@ -215,7 +218,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --max_steps "${MAX_STEPS}" \
     --num_generations "${NUM_GENERATIONS}" \
     --max_completion_length "${MAX_COMPLETION_LENGTH}" \
-    --save_steps 50 \
+    --save_steps 100 \
     --logging_steps 1 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
@@ -267,6 +270,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --reward_repeat_triplet_penalty "${REWARD_REPEAT_TRIPLET_PENALTY}" \
     --reward_repeat_triplet_levenshtein_threshold "${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD}" \
     --disable_thinking_in_chat_template "${DISABLE_THINKING_IN_CHAT_TEMPLATE}" \
+    --relaxed_answer_extraction "${RELAXED_ANSWER_EXTRACTION}" \
     --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
     --epsilon "${DAPO_EPSILON}" \
     "${_DAPO_EPS_HIGH_ARGS[@]}" \

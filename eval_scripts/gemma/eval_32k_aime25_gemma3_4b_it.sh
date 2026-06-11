@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -o logs/gemma_logs/eval_32k_aime25_gemma3_4b_it.%j.out
+#SBATCH -o logs/gemma_logs/eval_8k_aime25_gemma3_4b_it.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -43,9 +43,9 @@ use_lora=${USE_LORA:-0}
 num_samples=${NUM_SAMPLES:-0}
 val_n=${VAL_N:-16}
 pass_at_k=${PASS_AT_K:-1,4,8,16}
-# 32k completion plus prompt headroom. Gemma 3 4B IT supports up to 128k context.
-max_new_tokens=${MAX_NEW_TOKENS:-32768}
-max_model_len=${MAX_MODEL_LEN:-40960}
+# Gemma 3 4B IT official output budget is 8k; max_model_len=0 auto-fits prompt + completion.
+max_new_tokens=${MAX_NEW_TOKENS:-8192}
+max_model_len=${MAX_MODEL_LEN:-0}
 # Gemma 3 4B IT generation_config commonly uses temperature=0.6, top_p=0.9.
 temperature=${TEMPERATURE:-0.6}
 top_p=${TOP_P:-0.9}
@@ -65,7 +65,7 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
 else
   run_tag="${stamp}"
 fi
-output_json=${OUTPUT_JSON:-outputs/eval_32k_aime25_gemma3_4b_it/cot_32k/eval_${run_tag}.json}
+output_json=${OUTPUT_JSON:-outputs/eval_8k_aime25_gemma3_4b_it/cot_8k/eval_${run_tag}.json}
 
 mkdir -p "$(dirname "${output_json}")"
 echo "[EVAL] model_path=${model_path}"
@@ -131,6 +131,8 @@ fi
 if [[ "${force_base_tokenizer}" == "1" ]]; then
   cmd+=(--force-base-tokenizer)
 fi
+
+cmd+=(--no-thinking)
 
 "${cmd[@]}"
 

@@ -185,6 +185,7 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
             teacher_prompts=teacher_prompts,
         )
         g = (teacher_logps - student_logps).detach() * completion_mask
+        g = self._mask_token_gap_within_teacher_cap(g, completion_mask)
 
         snap_mask = self._completion_mask_through_first_eos(completion_ids)
         completion_texts = self._decode_completion_texts(completion_ids, snap_mask)
@@ -245,6 +246,7 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
             effective_delta = lambda_now * (weight - 1.0) * completion_mask
             factor = torch.clamp(1.0 + effective_delta, min=0.0)
             shaped = base_adv * factor
+            shaped = self._blend_teacher_shaping_length_cap(base_adv, shaped, completion_mask)
             return shaped * completion_mask, weight, effective_delta
 
         mixed_adv, mixed_weight, mixed_delta = _shape_with_token_gap(mixed_base_adv)
@@ -319,6 +321,11 @@ class RLSDSignFallbackStrictSplitTrainer(RLSDTrainer):
         token_count = completion_mask.sum().clamp(min=1.0)
 
         self._log_metric("token_gap_lambda", lambda_now)
+        self._log_metric("teacher_shaping_length_cap", float(self.teacher_shaping_length_cap))
+        self._log_metric(
+            "teacher_logprob_response_length_cap",
+            float(self._effective_teacher_logprob_response_length_cap()),
+        )
         self._log_metric("mixed_only", float(self.strict_split_mixed_only))
         self._log_metric("feedback_group_frac", float(feedback_group.float().mean().item()))
         self._log_metric("no_feedback_group_frac", float(no_feedback_group.float().mean().item()))

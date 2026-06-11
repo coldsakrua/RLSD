@@ -65,6 +65,7 @@ class OfficialOPSDScriptArguments:
     save_generation_steps: int = 0
     disable_thinking_in_chat_template: bool = True
     reward_boxed_last_token_fraction: float = 0.05
+    relaxed_answer_extraction: bool = False
     disable_wandb: bool = False
     generation_extra_kwargs_json: Optional[str] = None
 
@@ -268,6 +269,7 @@ def main() -> None:
     configure_math_reward_extraction(
         tokenizer=tokenizer,
         boxed_last_token_fraction=float(script_args.reward_boxed_last_token_fraction),
+        relaxed_answer_extraction=bool(script_args.relaxed_answer_extraction),
     )
 
     if script_args.disable_thinking_in_chat_template:

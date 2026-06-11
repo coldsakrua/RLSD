@@ -1,12 +1,16 @@
 #!/bin/bash
-#SBATCH -o logs/deepseek_logs/rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref.%j.out
+#SBATCH -o logs/deepseek_logs/rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref_300.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n26
+#SBATCH --exclude=gpua800n26,gpua800n25
+#
+# Two-phase schedule (1200 optimizer steps total):
+#   Phase 1 (steps 0..299):   RLSD flip_wrong_boost nodecay_no_teacher_ref
+#   Phase 2 (steps 300..1199): pure GRPO via opsd_train_grpo_strict.py, resume from checkpoint-300
 
 set -eo pipefail
 nvidia-smi
@@ -27,8 +31,8 @@ MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/d
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/gsm8k}
 DATASET_SPLIT=${DATASET_SPLIT:-train}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref}
-RUN_CONFIG=${RUN_CONFIG:-rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref_300}
+RUN_CONFIG=${RUN_CONFIG:-rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref_300}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
@@ -43,6 +47,8 @@ MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12950}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
 PER_DEVICE_BS=${PER_DEVICE_BS:-8}
 MAX_STEPS=${MAX_STEPS:-1200}
+RLSD_PHASE_STEPS=${RLSD_PHASE_STEPS:-300}
+GRPO_PHASE_STEPS=${GRPO_PHASE_STEPS:-$((MAX_STEPS - RLSD_PHASE_STEPS))}
 # DeepSeek-Math context: prompt + completion <= 4096 (https://github.com/deepseek-ai/DeepSeek-Math)
 MODEL_MAX_LENGTH=${MODEL_MAX_LENGTH:-4096}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-256}
@@ -52,7 +58,6 @@ PROMPT_PREFIX=${PROMPT_PREFIX:-}
 PROMPT_SUFFIX=${PROMPT_SUFFIX:-}
 NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX:-false}
 MATH_INSTRUCTION_SUFFIX=${MATH_INSTRUCTION_SUFFIX:-}
-# Match eval: wrap GSM8K prompt in chat template (see eval_math_vllm_local._apply_chat_prompt).
 USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-false}
 
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
@@ -64,31 +69,32 @@ if [ -z "${LR_SCHEDULER_KWARGS+x}" ]; then
     LR_SCHEDULER_KWARGS="{\"lr_end\":${LR_END},\"power\":1.0}"
 fi
 
+# LR schedule is defined for the full ${MAX_STEPS}-step run; phase2 resumes optimizer/scheduler state.
+_SCHEDULE_WARMUP_STEPS="${WARMUP_STEPS}"
+if [ "${_SCHEDULE_WARMUP_STEPS:-0}" = "0" ] && [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
+    _SCHEDULE_WARMUP_STEPS=$(awk -v ms="${MAX_STEPS}" -v r="${WARMUP_RATIO}" 'BEGIN { printf "%d", int(ms * r) }')
+fi
+
 TRAIN_LR_ARGS=(--learning_rate "${LEARNING_RATE}" --lr_scheduler_type "${LR_SCHEDULER_TYPE}")
-if [ "${WARMUP_STEPS:-0}" != "0" ]; then
-    TRAIN_LR_ARGS+=(--warmup_steps "${WARMUP_STEPS}")
-elif [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
-    TRAIN_LR_ARGS+=(--warmup_ratio "${WARMUP_RATIO}")
+if [ "${_SCHEDULE_WARMUP_STEPS:-0}" != "0" ]; then
+    TRAIN_LR_ARGS+=(--warmup_steps "${_SCHEDULE_WARMUP_STEPS}")
 fi
 if [ -n "${LR_SCHEDULER_KWARGS}" ]; then
     TRAIN_LR_ARGS+=(--lr_scheduler_kwargs "${LR_SCHEDULER_KWARGS}")
 fi
 
-# Effective warmup steps for logging only (HuggingFace: warmup_steps = floor(max_steps * warmup_ratio)).
-if [ "${WARMUP_STEPS:-0}" != "0" ]; then
-    _WU_DESC="warmup_steps=${WARMUP_STEPS}"
-elif [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
-    _WU_STEPS=$(awk -v ms="${MAX_STEPS}" -v r="${WARMUP_RATIO}" 'BEGIN { printf "%d", int(ms * r) }')
-    _WU_DESC="warmup_ratio=${WARMUP_RATIO} -> ~${_WU_STEPS} optimizer steps (max_steps=${MAX_STEPS})"
+if [ "${_SCHEDULE_WARMUP_STEPS:-0}" != "0" ]; then
+    _WU_DESC="warmup_steps=${_SCHEDULE_WARMUP_STEPS} (of max_steps=${MAX_STEPS})"
 else
     _WU_DESC="no warmup"
 fi
 
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.9}
-# DeepSeekMath-RL uses a 4096-token context; keep rollout sampling configurable.
-TEMPERATURE=${TEMPERATURE:-0.6}
-TOP_P=${TOP_P:-0.9}
+RLSD_TEMPERATURE=${RLSD_TEMPERATURE:-0.6}
+RLSD_TOP_P=${RLSD_TOP_P:-0.9}
+GRPO_TEMPERATURE=${GRPO_TEMPERATURE:-0.7}
+GRPO_TOP_P=${GRPO_TOP_P:-0.95}
 TOP_K=${TOP_K:-20}
 MIN_P=${MIN_P:-0.0}
 REPETITION_PENALTY=${REPETITION_PENALTY:-1.0}
@@ -104,7 +110,6 @@ VLLM_SERVER_PORT=${VLLM_SERVER_PORT:-8000}
 VLLM_SERVER_BASE_URL=${VLLM_SERVER_BASE_URL:-http://${VLLM_SERVER_HOST}:${VLLM_SERVER_PORT}}
 VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
 VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
-# Keep vLLM serving length aligned with the training budget from the reference script.
 VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-${MAX_LENGTH}}
 
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
@@ -142,9 +147,16 @@ LORA_R=${LORA_R:-64}
 LORA_ALPHA=${LORA_ALPHA:-128}
 STRICT_LORA_ONLY=${STRICT_LORA_ONLY:-true}
 
+SKIP_PHASE1=${SKIP_PHASE1:-false}
+RESUME_CHECKPOINT=${RESUME_CHECKPOINT:-}
+
 if [ "${TRAIN_CUDA_VISIBLE_DEVICES}" = "${GEN_CUDA_VISIBLE_DEVICES}" ]; then
     echo "[error] TRAIN_CUDA_VISIBLE_DEVICES and GEN_CUDA_VISIBLE_DEVICES must be different."
     exit 1
+fi
+
+if [ "${GRPO_PHASE_STEPS}" != "$((MAX_STEPS - RLSD_PHASE_STEPS))" ]; then
+    echo "[warn] GRPO_PHASE_STEPS=${GRPO_PHASE_STEPS} != MAX_STEPS-RLSD_PHASE_STEPS=$((MAX_STEPS - RLSD_PHASE_STEPS))"
 fi
 
 VLLM_SERVER_LOG="${OUTPUT_DIR}/vllm_server.log"
@@ -168,30 +180,128 @@ if [ -n "${VLLM_MAX_MODEL_LEN}" ] && [ "${VLLM_MAX_MODEL_LEN}" != "0" ]; then
     VLLM_SERVE_ARGS+=(--max-model-len "${VLLM_MAX_MODEL_LEN}")
 fi
 
-echo "[ablation] wrong_path_positive_flip=true (base_adv<0 & g>0 -> positive adv)"
-echo "[ablation] teacher_include_reference_solution=${TEACHER_INCLUDE_REFERENCE_SOLUTION}"
+_MATH_SUFFIX_ARGS=()
+if [ -n "${MATH_INSTRUCTION_SUFFIX}" ]; then
+    _MATH_SUFFIX_ARGS+=(--math_instruction_suffix "${MATH_INSTRUCTION_SUFFIX}")
+fi
+
+echo "[schedule] phase1 RLSD steps 0..$((RLSD_PHASE_STEPS - 1)) (${RLSD_PHASE_STEPS} steps)"
+echo "[schedule] phase2 pure GRPO steps ${RLSD_PHASE_STEPS}..$((MAX_STEPS - 1)) (${GRPO_PHASE_STEPS} steps)"
 echo "[launch] context budget: max_length=${MAX_LENGTH} (prompt<=${MAX_PROMPT_LENGTH}, completion<=${MAX_COMPLETION_LENGTH})"
 echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
-echo "[launch] VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN} (set 0 to omit --max-model-len)"
 CUDA_VISIBLE_DEVICES="${GEN_CUDA_VISIBLE_DEVICES}" \
 PYTORCH_CUDA_ALLOC_CONF="" \
 trl vllm-serve "${VLLM_SERVE_ARGS[@]}" \
     > "${VLLM_SERVER_LOG}" 2>&1 &
 VLLM_SERVER_PID=$!
 
-_MATH_SUFFIX_ARGS=()
-if [ -n "${MATH_INSTRUCTION_SUFFIX}" ]; then
-    _MATH_SUFFIX_ARGS+=(--math_instruction_suffix "${MATH_INSTRUCTION_SUFFIX}")
+if [ "${SKIP_PHASE1}" != "true" ]; then
+    echo "[phase1] RLSD flip_wrong_boost nodecay_no_teacher_ref, max_steps=${RLSD_PHASE_STEPS}"
+    echo "[phase1] wrong_path_positive_flip=true, teacher_include_reference_solution=${TEACHER_INCLUDE_REFERENCE_SOLUTION}"
+    echo "[phase1] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES} lr=${LEARNING_RATE} sched=${LR_SCHEDULER_TYPE} ${_WU_DESC}"
+    CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
+        --config_file accelerate.yaml \
+        --num_processes 1 \
+        --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
+        --main_process_port "${MAIN_PROCESS_PORT}" \
+        opsd_train_anchor_strict_split_flip_wrong_boost.py \
+        --model_name_or_path "${MODEL_PATH}" \
+        --dataset_path "${DATASET_PATH}" \
+        --dataset_split "${DATASET_SPLIT}" \
+        --dataset_cache_dir "${DATASET_CACHE_DIR}" \
+        --prompt_prefix "${PROMPT_PREFIX}" \
+        --prompt_suffix "${PROMPT_SUFFIX}" \
+        --normalize_math_prompt_to_standard_suffix "${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX}" \
+        --use_dapo_raw_prompt "${USE_DAPO_RAW_PROMPT}" \
+        "${_MATH_SUFFIX_ARGS[@]}" \
+        "${TRAIN_LR_ARGS[@]}" \
+        --max_grad_norm 1.0 \
+        --per_device_train_batch_size "${PER_DEVICE_BS}" \
+        --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
+        --output_dir "${OUTPUT_DIR}" \
+        --run_config "${RUN_CONFIG}" \
+        --max_steps "${RLSD_PHASE_STEPS}" \
+        --num_generations "${NUM_GENERATIONS}" \
+        --max_completion_length "${MAX_COMPLETION_LENGTH}" \
+        --save_steps "${RLSD_PHASE_STEPS}" \
+        --logging_steps 1 \
+        --attn_implementation sdpa \
+        --torch_dtype bfloat16 \
+        --max_length "${MAX_LENGTH}" \
+        --beta 0 \
+        --use_vllm \
+        --vllm_mode server \
+        --vllm_server_base_url "${VLLM_SERVER_BASE_URL}" \
+        --vllm_server_timeout "${VLLM_SERVER_TIMEOUT}" \
+        --vllm_gpu_memory_utilization "${VLLM_GPU_MEM_UTIL}" \
+        --vllm_tensor_parallel_size "${VLLM_TENSOR_PARALLEL_SIZE}" \
+        --use_peft true \
+        --strict_lora_only "${STRICT_LORA_ONLY}" \
+        --lora_r "${LORA_R}" \
+        --lora_alpha "${LORA_ALPHA}" \
+        --lora_target_modules "${LORA_TARGET_MODULES}" \
+        --temperature "${RLSD_TEMPERATURE}" \
+        --top_p "${RLSD_TOP_P}" \
+        --top_k "${TOP_K}" \
+        --min_p "${MIN_P}" \
+        --repetition_penalty "${REPETITION_PENALTY}" \
+        --generation_extra_kwargs_json "${GENERATION_KWARGS}" \
+        --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
+        --token_gap_lambda "${TOKEN_GAP_LAMBDA}" \
+        --token_gap_decay_steps "${TOKEN_GAP_DECAY_STEPS}" \
+        --fixed_teacher false \
+        --teacher_update_interval_steps "${TEACHER_UPDATE_INTERVAL_STEPS}" \
+        --teacher_include_reference_solution "${TEACHER_INCLUDE_REFERENCE_SOLUTION}" \
+        --rollout_filter "${ROLLOUT_FILTER}" \
+        --all_correct_base_advantage "${ALL_CORRECT_BASE_ADVANTAGE}" \
+        --all_wrong_base_advantage "${ALL_WRONG_BASE_ADVANTAGE}" \
+        --correct_weight_clip_low "${CORRECT_WEIGHT_CLIP_LOW}" \
+        --correct_weight_clip_high "${CORRECT_WEIGHT_CLIP_HIGH}" \
+        --wrong_weight_clip_low "${WRONG_WEIGHT_CLIP_LOW}" \
+        --wrong_weight_clip_high "${WRONG_WEIGHT_CLIP_HIGH}" \
+        --adv_clip_low "${ADV_CLIP_LOW}" \
+        --adv_clip_high "${ADV_CLIP_HIGH}" \
+        --suppress_gt_shortcut "${SUPPRESS_GT_SHORTCUT}" \
+        --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
+        --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
+        --fallback_tail_tokens "${FALLBACK_TAIL_TOKENS}" \
+        --reward_format_penalties "${REWARD_FORMAT_PENALTIES}" \
+        --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
+        --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \
+        --reward_min_consecutive_boxed "${REWARD_MIN_CONSECUTIVE_BOXED}" \
+        --reward_repeat_triplet_penalty "${REWARD_REPEAT_TRIPLET_PENALTY}" \
+        --reward_repeat_triplet_levenshtein_threshold "${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD}" \
+        --disable_thinking_in_chat_template "${DISABLE_THINKING_IN_CHAT_TEMPLATE}" \
+        --relaxed_answer_extraction "${RELAXED_ANSWER_EXTRACTION}" \
+        --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
+        --epsilon "${DAPO_EPSILON}" \
+        --dapo_epsilon_high "${DAPO_EPSILON_HIGH}" \
+        --disable_wandb "${DISABLE_WANDB}" \
+        --gradient_checkpointing
+else
+    echo "[phase1] skipped (SKIP_PHASE1=true)"
 fi
 
-echo "[launch] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES} lr=${LEARNING_RATE} sched=${LR_SCHEDULER_TYPE} ${_WU_DESC}"
-echo "[launch] batch: per_device_bs=${PER_DEVICE_BS} grad_acc=${GRAD_ACC_STEPS} num_generations=${NUM_GENERATIONS} -> $((PER_DEVICE_BS * GRAD_ACC_STEPS)) prompts/step, $((PER_DEVICE_BS * GRAD_ACC_STEPS * NUM_GENERATIONS)) rollouts/step"
+if [ -n "${RESUME_CHECKPOINT}" ]; then
+    PHASE1_CKPT="${RESUME_CHECKPOINT}"
+else
+    PHASE1_CKPT="${OUTPUT_DIR}/checkpoint-${RLSD_PHASE_STEPS}"
+fi
+
+if [ ! -d "${PHASE1_CKPT}" ]; then
+    echo "[error] phase1 checkpoint not found: ${PHASE1_CKPT}"
+    exit 1
+fi
+echo "[phase2] resume_from_checkpoint=${PHASE1_CKPT}"
+
+echo "[phase2] pure GRPO (opsd_train_grpo_strict.py), max_steps=${MAX_STEPS} (continues from step ${RLSD_PHASE_STEPS})"
+echo "[phase2] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES} temperature=${GRPO_TEMPERATURE} top_p=${GRPO_TOP_P}"
 CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --config_file accelerate.yaml \
     --num_processes 1 \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --main_process_port "${MAIN_PROCESS_PORT}" \
-    opsd_train_anchor_strict_split_flip_wrong_boost.py \
+    opsd_train_grpo_strict.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
     --dataset_split "${DATASET_SPLIT}" \
@@ -206,8 +316,9 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --per_device_train_batch_size "${PER_DEVICE_BS}" \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --output_dir "${OUTPUT_DIR}" \
-    --run_config "${RUN_CONFIG}" \
+    --run_config "${RUN_CONFIG}_grpo_phase" \
     --max_steps "${MAX_STEPS}" \
+    --resume_from_checkpoint "${PHASE1_CKPT}" \
     --num_generations "${NUM_GENERATIONS}" \
     --max_completion_length "${MAX_COMPLETION_LENGTH}" \
     --save_steps 100 \
@@ -216,6 +327,8 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --torch_dtype bfloat16 \
     --max_length "${MAX_LENGTH}" \
     --beta 0 \
+    --epsilon "${DAPO_EPSILON}" \
+    --epsilon_high "${DAPO_EPSILON_HIGH}" \
     --use_vllm \
     --vllm_mode server \
     --vllm_server_base_url "${VLLM_SERVER_BASE_URL}" \
@@ -227,31 +340,13 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --lora_r "${LORA_R}" \
     --lora_alpha "${LORA_ALPHA}" \
     --lora_target_modules "${LORA_TARGET_MODULES}" \
-    --temperature "${TEMPERATURE}" \
-    --top_p "${TOP_P}" \
+    --temperature "${GRPO_TEMPERATURE}" \
+    --top_p "${GRPO_TOP_P}" \
     --top_k "${TOP_K}" \
     --min_p "${MIN_P}" \
     --repetition_penalty "${REPETITION_PENALTY}" \
     --generation_extra_kwargs_json "${GENERATION_KWARGS}" \
     --mask_truncated_completions "${MASK_TRUNCATED_COMPLETIONS}" \
-    --token_gap_lambda "${TOKEN_GAP_LAMBDA}" \
-    --token_gap_decay_steps "${TOKEN_GAP_DECAY_STEPS}" \
-    --fixed_teacher false \
-    --teacher_update_interval_steps "${TEACHER_UPDATE_INTERVAL_STEPS}" \
-    --teacher_include_reference_solution "${TEACHER_INCLUDE_REFERENCE_SOLUTION}" \
-    --rollout_filter "${ROLLOUT_FILTER}" \
-    --all_correct_base_advantage "${ALL_CORRECT_BASE_ADVANTAGE}" \
-    --all_wrong_base_advantage "${ALL_WRONG_BASE_ADVANTAGE}" \
-    --correct_weight_clip_low "${CORRECT_WEIGHT_CLIP_LOW}" \
-    --correct_weight_clip_high "${CORRECT_WEIGHT_CLIP_HIGH}" \
-    --wrong_weight_clip_low "${WRONG_WEIGHT_CLIP_LOW}" \
-    --wrong_weight_clip_high "${WRONG_WEIGHT_CLIP_HIGH}" \
-    --adv_clip_low "${ADV_CLIP_LOW}" \
-    --adv_clip_high "${ADV_CLIP_HIGH}" \
-    --suppress_gt_shortcut "${SUPPRESS_GT_SHORTCUT}" \
-    --answer_token_downweight "${ANSWER_TOKEN_DOWNWEIGHT}" \
-    --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
-    --fallback_tail_tokens "${FALLBACK_TAIL_TOKENS}" \
     --reward_format_penalties "${REWARD_FORMAT_PENALTIES}" \
     --reward_no_eos_penalty "${REWARD_NO_EOS_PENALTY}" \
     --reward_multi_boxed_penalty "${REWARD_MULTI_BOXED_PENALTY}" \
@@ -261,7 +356,8 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --disable_thinking_in_chat_template "${DISABLE_THINKING_IN_CHAT_TEMPLATE}" \
     --relaxed_answer_extraction "${RELAXED_ANSWER_EXTRACTION}" \
     --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
-    --epsilon "${DAPO_EPSILON}" \
-    --dapo_epsilon_high "${DAPO_EPSILON_HIGH}" \
+    --reward_binary_threshold "${REWARD_BINARY_THRESHOLD}" \
     --disable_wandb "${DISABLE_WANDB}" \
     --gradient_checkpointing
+
+echo "[done] final checkpoint expected at ${OUTPUT_DIR}/checkpoint-${MAX_STEPS}"

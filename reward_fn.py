@@ -1,14 +1,21 @@
 import re
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
+from data_utils import extract_gsm8k_final_answer
+
 # Filled by ``configure_math_reward_extraction`` from training script (tokenizer + tail fraction).
-_MATH_REWARD_EXTRACT_CFG: dict[str, Any] = {"tokenizer": None, "boxed_last_token_fraction": 0.0}
+_MATH_REWARD_EXTRACT_CFG: dict[str, Any] = {
+    "tokenizer": None,
+    "boxed_last_token_fraction": 0.0,
+    "relaxed_answer_extraction": False,
+}
 
 
 def configure_math_reward_extraction(
     *,
     tokenizer=None,
     boxed_last_token_fraction: float = 0.0,
+    relaxed_answer_extraction: bool = False,
 ) -> None:
     """
     Configure answer extraction for reward scoring.
@@ -17,9 +24,13 @@ def configure_math_reward_extraction(
     lies in the last that fraction of **completion tokens** (via ``offset_mapping`` when ``tokenizer`` is set).
     If ``tokenizer`` is ``None``, non-whitespace runs (``re.finditer(r"\\S+", text)``) are used as a coarse token proxy.
     Ground-truth strings should use ``for_ground_truth=True`` in ``_extract_final_answer`` (no tail gate).
+
+    When ``relaxed_answer_extraction=True``, model completions also accept DeepSeek-style phrases such as
+    ``The answer is: $...$`` after ``\\boxed{}`` extraction fails.
     """
     _MATH_REWARD_EXTRACT_CFG["tokenizer"] = tokenizer
     _MATH_REWARD_EXTRACT_CFG["boxed_last_token_fraction"] = max(0.0, float(boxed_last_token_fraction))
+    _MATH_REWARD_EXTRACT_CFG["relaxed_answer_extraction"] = bool(relaxed_answer_extraction)
 
 try:
     from math_verify import parse, verify
@@ -34,6 +45,18 @@ _BOXED_RE = re.compile(r"\\boxed\{([^{}]+)\}")
 _ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL)
 _ANSWER_LINE_RE = re.compile(
     r"(?im)^\s*(?:final\s+answer|answer)\s*:\s*(.+?)\s*$",
+)
+
+_RELAXED_MATH_ANSWER_RES = (
+    re.compile(r"[Tt]he answer is:?\s*\$([^$]+)\$"),
+    re.compile(r"[Tt]he answer is:?\s*\\boxed\{([^}]+)\}"),
+    re.compile(r"[Tt]he answer is:?\s*(\\frac\{[^}]+\}\{[^}]+\})"),
+    re.compile(r"[Tt]he answer is:?\s*([+-]?\d+(?:\.\d+)?(?:/\d+)?)"),
+    re.compile(r"[Ff]inal answer:?\s*\$([^$]+)\$"),
+    re.compile(r"[Ff]inal answer:?\s*\\boxed\{([^}]+)\}"),
+    re.compile(r"答案是:?\s*\$([^$]+)\$"),
+    re.compile(r"答案是:?\s*\\boxed\{([^}]+)\}"),
+    re.compile(r"答案是:?\s*(\d+)"),
 )
 
 _BOXED_BEGIN = "\\boxed{"
@@ -249,6 +272,24 @@ def _extract_boxed_answer(text: str, *, tail_start: int = 0) -> str:
     return boxed[-1][2].strip()
 
 
+def _extract_relaxed_completion_answer(text: str, *, tail_start: int = 0) -> str:
+    """Prefer ``\\boxed{}``; fall back to DeepSeek-style answer phrases in the tail region."""
+    boxed = _extract_boxed_answer(text, tail_start=tail_start)
+    if boxed:
+        return boxed
+    region = text[tail_start:] if tail_start > 0 else text
+    offset = tail_start
+    best = ""
+    best_pos = -1
+    for pat in _RELAXED_MATH_ANSWER_RES:
+        for m in pat.finditer(region):
+            pos = offset + m.start()
+            if pos >= best_pos:
+                best_pos = pos
+                best = m.group(1).strip()
+    return best
+
+
 def _extract_final_answer(text: str, *, for_ground_truth: bool = False) -> str:
     """
     For model completions, extract only a balanced ``\\boxed{...}`` answer.
@@ -264,11 +305,17 @@ def _extract_final_answer(text: str, *, for_ground_truth: bool = False) -> str:
         frac = float(_MATH_REWARD_EXTRACT_CFG.get("boxed_last_token_fraction") or 0.0)
         tok = _MATH_REWARD_EXTRACT_CFG.get("tokenizer")
         tail_start = _char_start_of_last_token_fraction(text, tok, frac) if frac > 0 else 0
+        if _MATH_REWARD_EXTRACT_CFG.get("relaxed_answer_extraction"):
+            return _extract_relaxed_completion_answer(text, tail_start=tail_start)
         return _extract_boxed_answer(text, tail_start=tail_start)
 
     boxed_answer = _extract_boxed_answer(text)
     if boxed_answer:
         return boxed_answer
+
+    gsm8k_answer = extract_gsm8k_final_answer(text)
+    if gsm8k_answer:
+        return gsm8k_answer
 
     tag_matches = _ANSWER_TAG_RE.findall(text)
     if tag_matches:

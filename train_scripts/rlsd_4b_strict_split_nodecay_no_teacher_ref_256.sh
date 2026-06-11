@@ -1,19 +1,18 @@
 #!/bin/bash
-#SBATCH -o logs/deepseek_logs/rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref.%j.out
+#SBATCH -o logs/rlsd_4b_strict_split_nodecay_no_teacher_ref_256.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n26
-
+#SBATCH --exclude=gpua800n24
 set -eo pipefail
 nvidia-smi
 
 BASE_DIR="/gpfs/share/home/2501210611/RLSD"
 cd "${BASE_DIR}"
-mkdir -p logs/deepseek_logs
+mkdir -p logs
 
 source activate anchor
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
@@ -23,12 +22,11 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset ROCR_VISIBLE_DEVICES
 
-MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/deepseek-math-7b-rl}
-DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/gsm8k}
-DATASET_SPLIT=${DATASET_SPLIT:-train}
+MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
+DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref}
-RUN_CONFIG=${RUN_CONFIG:-rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_4b_strict_split_nodecay_no_teacher_ref_256}
+RUN_CONFIG=${RUN_CONFIG:-rlsd_4b_strict_split_nodecay_no_teacher_ref_256}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
@@ -39,21 +37,19 @@ export WANDB_DIR="${OUTPUT_DIR}"
 export WANDB_DATA_DIR="${OUTPUT_DIR}/.wandb_data"
 mkdir -p "${WANDB_DATA_DIR}"
 
-MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12950}
+MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
-PER_DEVICE_BS=${PER_DEVICE_BS:-8}
-MAX_STEPS=${MAX_STEPS:-1200}
-# DeepSeek-Math context: prompt + completion <= 4096 (https://github.com/deepseek-ai/DeepSeek-Math)
-MODEL_MAX_LENGTH=${MODEL_MAX_LENGTH:-4096}
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-256}
-MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-$((MODEL_MAX_LENGTH - MAX_PROMPT_LENGTH))}
-MAX_LENGTH=${MAX_LENGTH:-${MODEL_MAX_LENGTH}}
+PER_DEVICE_BS=${PER_DEVICE_BS:-2}
+MAX_STEPS=${MAX_STEPS:-300}
+MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
+# Keep enough prompt budget: trainer computes max_prompt_length = max_length - max_completion_length.
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+MAX_LENGTH=$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))
 PROMPT_PREFIX=${PROMPT_PREFIX:-}
 PROMPT_SUFFIX=${PROMPT_SUFFIX:-}
 NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX:-false}
 MATH_INSTRUCTION_SUFFIX=${MATH_INSTRUCTION_SUFFIX:-}
-# Match eval: wrap GSM8K prompt in chat template (see eval_math_vllm_local._apply_chat_prompt).
-USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-false}
+USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-true}
 
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
 WARMUP_RATIO=${WARMUP_RATIO:-0.05}
@@ -79,16 +75,15 @@ if [ "${WARMUP_STEPS:-0}" != "0" ]; then
     _WU_DESC="warmup_steps=${WARMUP_STEPS}"
 elif [ -n "${WARMUP_RATIO}" ] && [ "${WARMUP_RATIO}" != "0" ]; then
     _WU_STEPS=$(awk -v ms="${MAX_STEPS}" -v r="${WARMUP_RATIO}" 'BEGIN { printf "%d", int(ms * r) }')
-    _WU_DESC="warmup_ratio=${WARMUP_RATIO} -> ~${_WU_STEPS} optimizer steps (max_steps=${MAX_STEPS})"
+    _WU_DESC="warmup_ratio=${WARMUP_RATIO} → ~${_WU_STEPS} optimizer steps (max_steps=${MAX_STEPS})"
 else
     _WU_DESC="no warmup"
 fi
 
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 VLLM_GPU_MEM_UTIL=${VLLM_GPU_MEM_UTIL:-0.9}
-# DeepSeekMath-RL uses a 4096-token context; keep rollout sampling configurable.
-TEMPERATURE=${TEMPERATURE:-0.6}
-TOP_P=${TOP_P:-0.9}
+TEMPERATURE=${TEMPERATURE:-0.7}
+TOP_P=${TOP_P:-0.95}
 TOP_K=${TOP_K:-20}
 MIN_P=${MIN_P:-0.0}
 REPETITION_PENALTY=${REPETITION_PENALTY:-1.0}
@@ -104,8 +99,6 @@ VLLM_SERVER_PORT=${VLLM_SERVER_PORT:-8000}
 VLLM_SERVER_BASE_URL=${VLLM_SERVER_BASE_URL:-http://${VLLM_SERVER_HOST}:${VLLM_SERVER_PORT}}
 VLLM_SERVER_TIMEOUT=${VLLM_SERVER_TIMEOUT:-300}
 VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
-# Keep vLLM serving length aligned with the training budget from the reference script.
-VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-${MAX_LENGTH}}
 
 ROLLOUT_FILTER=${ROLLOUT_FILTER:-all}
 TOKEN_GAP_LAMBDA=${TOKEN_GAP_LAMBDA:-1.0}
@@ -119,6 +112,9 @@ WRONG_WEIGHT_CLIP_LOW=${WRONG_WEIGHT_CLIP_LOW:-0.95}
 WRONG_WEIGHT_CLIP_HIGH=${WRONG_WEIGHT_CLIP_HIGH:-1.2}
 TEACHER_UPDATE_INTERVAL_STEPS=${TEACHER_UPDATE_INTERVAL_STEPS:-10}
 TEACHER_INCLUDE_REFERENCE_SOLUTION=${TEACHER_INCLUDE_REFERENCE_SOLUTION:-false}
+# Teacher RLSD shaping and logprob gap apply only to the first N response tokens; tail keeps GRPO base A.
+TEACHER_SHAPING_LENGTH_CAP="${TEACHER_SHAPING_LENGTH_CAP:-256}"
+TEACHER_LOGPROB_RESPONSE_LENGTH_CAP="${TEACHER_LOGPROB_RESPONSE_LENGTH_CAP:-${TEACHER_SHAPING_LENGTH_CAP}}"
 ADV_CLIP_LOW=${ADV_CLIP_LOW:--1.2}
 ADV_CLIP_HIGH=${ADV_CLIP_HIGH:-1.2}
 SUPPRESS_GT_SHORTCUT=${SUPPRESS_GT_SHORTCUT:-true}
@@ -132,7 +128,6 @@ REWARD_MIN_CONSECUTIVE_BOXED=${REWARD_MIN_CONSECUTIVE_BOXED:-2}
 REWARD_REPEAT_TRIPLET_PENALTY=${REWARD_REPEAT_TRIPLET_PENALTY:-0.0}
 REWARD_REPEAT_TRIPLET_LEV_THRESHOLD=${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD:-0}
 DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}
-RELAXED_ANSWER_EXTRACTION=${RELAXED_ANSWER_EXTRACTION:-true}
 REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
 DAPO_EPSILON=${DAPO_EPSILON:-0.2}
 DAPO_EPSILON_HIGH=${DAPO_EPSILON_HIGH:-0.28}
@@ -157,25 +152,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-VLLM_SERVE_ARGS=(
-    --model "${MODEL_PATH}"
-    --host "${VLLM_SERVER_HOST}"
-    --port "${VLLM_SERVER_PORT}"
-    --gpu-memory-utilization "${VLLM_GPU_MEM_UTIL}"
-    --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}"
-)
-if [ -n "${VLLM_MAX_MODEL_LEN}" ] && [ "${VLLM_MAX_MODEL_LEN}" != "0" ]; then
-    VLLM_SERVE_ARGS+=(--max-model-len "${VLLM_MAX_MODEL_LEN}")
-fi
-
-echo "[ablation] wrong_path_positive_flip=true (base_adv<0 & g>0 -> positive adv)"
 echo "[ablation] teacher_include_reference_solution=${TEACHER_INCLUDE_REFERENCE_SOLUTION}"
-echo "[launch] context budget: max_length=${MAX_LENGTH} (prompt<=${MAX_PROMPT_LENGTH}, completion<=${MAX_COMPLETION_LENGTH})"
+echo "[ablation] teacher_shaping_length_cap=${TEACHER_SHAPING_LENGTH_CAP} teacher_logprob_response_length_cap=${TEACHER_LOGPROB_RESPONSE_LENGTH_CAP}"
 echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
-echo "[launch] VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN} (set 0 to omit --max-model-len)"
 CUDA_VISIBLE_DEVICES="${GEN_CUDA_VISIBLE_DEVICES}" \
 PYTORCH_CUDA_ALLOC_CONF="" \
-trl vllm-serve "${VLLM_SERVE_ARGS[@]}" \
+trl vllm-serve \
+    --model "${MODEL_PATH}" \
+    --host "${VLLM_SERVER_HOST}" \
+    --port "${VLLM_SERVER_PORT}" \
+    --gpu-memory-utilization "${VLLM_GPU_MEM_UTIL}" \
+    --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}" \
     > "${VLLM_SERVER_LOG}" 2>&1 &
 VLLM_SERVER_PID=$!
 
@@ -185,16 +172,15 @@ if [ -n "${MATH_INSTRUCTION_SUFFIX}" ]; then
 fi
 
 echo "[launch] trainer on GPU ${TRAIN_CUDA_VISIBLE_DEVICES} lr=${LEARNING_RATE} sched=${LR_SCHEDULER_TYPE} ${_WU_DESC}"
-echo "[launch] batch: per_device_bs=${PER_DEVICE_BS} grad_acc=${GRAD_ACC_STEPS} num_generations=${NUM_GENERATIONS} -> $((PER_DEVICE_BS * GRAD_ACC_STEPS)) prompts/step, $((PER_DEVICE_BS * GRAD_ACC_STEPS * NUM_GENERATIONS)) rollouts/step"
 CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --config_file accelerate.yaml \
     --num_processes 1 \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --main_process_port "${MAIN_PROCESS_PORT}" \
-    opsd_train_anchor_strict_split_flip_wrong_boost.py \
+    opsd_train_anchor_strict_split.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
-    --dataset_split "${DATASET_SPLIT}" \
+    --dataset_split train \
     --dataset_cache_dir "${DATASET_CACHE_DIR}" \
     --prompt_prefix "${PROMPT_PREFIX}" \
     --prompt_suffix "${PROMPT_SUFFIX}" \
@@ -210,7 +196,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --max_steps "${MAX_STEPS}" \
     --num_generations "${NUM_GENERATIONS}" \
     --max_completion_length "${MAX_COMPLETION_LENGTH}" \
-    --save_steps 100 \
+    --save_steps 50 \
     --logging_steps 1 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
@@ -239,6 +225,8 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --fixed_teacher false \
     --teacher_update_interval_steps "${TEACHER_UPDATE_INTERVAL_STEPS}" \
     --teacher_include_reference_solution "${TEACHER_INCLUDE_REFERENCE_SOLUTION}" \
+    --teacher_shaping_length_cap "${TEACHER_SHAPING_LENGTH_CAP}" \
+    --teacher_logprob_response_length_cap "${TEACHER_LOGPROB_RESPONSE_LENGTH_CAP}" \
     --rollout_filter "${ROLLOUT_FILTER}" \
     --all_correct_base_advantage "${ALL_CORRECT_BASE_ADVANTAGE}" \
     --all_wrong_base_advantage "${ALL_WRONG_BASE_ADVANTAGE}" \
@@ -259,7 +247,6 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --reward_repeat_triplet_penalty "${REWARD_REPEAT_TRIPLET_PENALTY}" \
     --reward_repeat_triplet_levenshtein_threshold "${REWARD_REPEAT_TRIPLET_LEV_THRESHOLD}" \
     --disable_thinking_in_chat_template "${DISABLE_THINKING_IN_CHAT_TEMPLATE}" \
-    --relaxed_answer_extraction "${RELAXED_ANSWER_EXTRACTION}" \
     --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
     --epsilon "${DAPO_EPSILON}" \
     --dapo_epsilon_high "${DAPO_EPSILON_HIGH}" \

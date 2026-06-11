@@ -283,6 +283,7 @@ class RLSDTrainer(GRPOTrainer):
                     input_ids,
                     attention_mask,
                     logits_to_keep,
+                    batch_size=self._logprob_micro_batch_size(),
                 )
 
         self._refresh_teacher_snapshot_if_needed(model_for_teacher)
@@ -294,6 +295,7 @@ class RLSDTrainer(GRPOTrainer):
                     input_ids,
                     attention_mask,
                     logits_to_keep,
+                    batch_size=self._logprob_micro_batch_size(),
                 )
 
         param_by_name = dict(model_for_teacher.named_parameters())
@@ -311,12 +313,20 @@ class RLSDTrainer(GRPOTrainer):
                     input_ids,
                     attention_mask,
                     logits_to_keep,
+                    batch_size=self._logprob_micro_batch_size(),
                 )
             finally:
                 for name, student_tensor in restore_state.items():
                     param = param_by_name.get(name)
                     if param is not None:
                         param.copy_(student_tensor)
+
+    def _logprob_micro_batch_size(self) -> int:
+        """Match GRPO loss micro-batching when scoring full generation batches."""
+        bs = getattr(self.args, "per_device_train_batch_size", None)
+        if bs is None or int(bs) <= 0:
+            return 1
+        return int(bs)
 
     def _compute_student_logps(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         old_per_token_logps = batch.get("old_per_token_logps")
@@ -332,6 +342,7 @@ class RLSDTrainer(GRPOTrainer):
                 input_ids,
                 attention_mask,
                 logits_to_keep,
+                batch_size=self._logprob_micro_batch_size(),
             )
         return self._extract_logps(output).detach()
 
@@ -489,6 +500,7 @@ class RLSDTrainer(GRPOTrainer):
             input_ids,
             attention_mask,
             logits_to_keep,
+            batch_size=self._logprob_micro_batch_size(),
             compute_entropy=True,
             pixel_values=inputs.get("pixel_values"),
             image_grid_thw=inputs.get("image_grid_thw"),

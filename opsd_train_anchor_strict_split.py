@@ -50,6 +50,9 @@ class ScriptArguments:
         "{prompt}\n\n[Reference solution]\n{solution}\n\n[Student response]\n"
     )
     teacher_include_reference_solution: bool = True
+    # Teacher RLSD shaping / logprob gap applies only to the first N response tokens (0 = full rollout).
+    teacher_shaping_length_cap: int = 0
+    teacher_logprob_response_length_cap: int = 0
 
     # Split-group base advantages and group scales on the single decayed lambda.
     # Mixed groups use the original GRPO advantage as base A.
@@ -80,6 +83,8 @@ class ScriptArguments:
     disable_thinking_in_chat_template: bool = True
     # Only credit ``\\boxed{}`` / ``<answer>`` starting in the last this fraction of completion **tokens** (0 = off).
     reward_boxed_last_token_fraction: float = 0.05
+    # DeepSeek-Math: also accept ``The answer is: $...$`` when scoring rollouts.
+    relaxed_answer_extraction: bool = False
     # DAPO-style asymmetric clipping for positive-advantage samples:
     # upper clip bound becomes (1 + epsilon_high) for adv>0.
     dapo_epsilon_high: Optional[float] = None
@@ -219,6 +224,11 @@ def main():
         f"{bool(script_args.teacher_include_reference_solution)}",
         flush=True,
     )
+    print(
+        f"[teacher] shaping_length_cap={int(script_args.teacher_shaping_length_cap)} "
+        f"logprob_response_length_cap={int(script_args.teacher_logprob_response_length_cap)}",
+        flush=True,
+    )
 
     if script_args.dapo_epsilon_high is not None:
         setattr(training_args, "epsilon_high", float(script_args.dapo_epsilon_high))
@@ -323,6 +333,7 @@ def main():
     configure_math_reward_extraction(
         tokenizer=tokenizer,
         boxed_last_token_fraction=float(script_args.reward_boxed_last_token_fraction),
+        relaxed_answer_extraction=bool(script_args.relaxed_answer_extraction),
     )
 
     if script_args.disable_thinking_in_chat_template:
@@ -375,6 +386,8 @@ def main():
         teacher_prompt_template=script_args.teacher_prompt_template,
         teacher_update_interval_steps=script_args.teacher_update_interval_steps,
         teacher_include_reference_solution=script_args.teacher_include_reference_solution,
+        teacher_shaping_length_cap=script_args.teacher_shaping_length_cap,
+        teacher_logprob_response_length_cap=script_args.teacher_logprob_response_length_cap,
         all_correct_base_advantage=script_args.all_correct_base_advantage,
         all_wrong_base_advantage=script_args.all_wrong_base_advantage,
         correct_weight_clip_low=script_args.correct_weight_clip_low,

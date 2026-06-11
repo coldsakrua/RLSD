@@ -90,6 +90,8 @@ class ScriptArguments:
     disable_thinking_in_chat_template: bool = True
     # Only credit ``\\boxed{}`` / ``<answer>`` starting in the last this fraction of completion **tokens** (0 = off).
     reward_boxed_last_token_fraction: float = 0.05
+    # DeepSeek-Math: also accept ``The answer is: $...$`` when scoring rollouts.
+    relaxed_answer_extraction: bool = False
     # DAPO-style asymmetric clipping for positive-advantage samples:
     # upper clip bound becomes (1 + epsilon_high) for adv>0.
     dapo_epsilon_high: Optional[float] = None
@@ -338,6 +340,7 @@ def main():
     configure_math_reward_extraction(
         tokenizer=tokenizer,
         boxed_last_token_fraction=float(script_args.reward_boxed_last_token_fraction),
+        relaxed_answer_extraction=bool(script_args.relaxed_answer_extraction),
     )
 
     if script_args.disable_thinking_in_chat_template:

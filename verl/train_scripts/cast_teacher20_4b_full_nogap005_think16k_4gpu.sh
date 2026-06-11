@@ -9,14 +9,6 @@
 #SBATCH --exclude=gpua800n02,gpua800n12,gpua800n01
 set -eo pipefail
 
-#
-# Variant of cast_teacher50_4b_full_nogap005.sh:
-# - teacher snapshot every 20 steps (base model until step 20)
-# - Qwen3 thinking mode enabled, max completion 16384
-# - 4x A800 actor+rollout; batch=2 with gpu_memory_utilization=0.7 for ~18k-token sequences
-# - truncated rollouts are discarded (not kept/truncated)
-# - teacher uses identical student prompt and full-response shaping/logprob
-#
 RUN_CONFIG="${RUN_CONFIG:-cast_teacher20_4b_full_nogap005_think16k_4gpu}"
 ADV_ESTIMATOR="${ADV_ESTIMATOR:-rlsd_strict_split_flip_wrong_boost}"
 REWARD_FUNCTION_NAME="${REWARD_FUNCTION_NAME:-compute_score}"
@@ -52,7 +44,7 @@ TOP_K="${TOP_K:-20}"
 MIN_P="${MIN_P:-0.0}"
 PRESENCE_PENALTY="${PRESENCE_PENALTY:-0.0}"
 
-# 4x A800 @ ~18k tokens / sample: batch=2 with VLLM mem util 0.7.
+
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-2}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
@@ -122,7 +114,7 @@ mkdir -p "${WANDB_DATA_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_ARTIFACT_DIR}"
 MAX_STEPS="${MAX_STEPS:-300}"
 SAVE_STEPS="${SAVE_STEPS:-50}"
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-16384}"
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1536}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 MAX_LENGTH="$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))"
 export RLSD_MAX_SEQ_LEN="${MAX_LENGTH}"
 export RLSD_MAX_RESPONSE_LENGTH="${MAX_COMPLETION_LENGTH}"

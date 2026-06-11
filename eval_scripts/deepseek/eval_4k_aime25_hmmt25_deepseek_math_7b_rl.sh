@@ -43,9 +43,10 @@ use_lora=${USE_LORA:-0}
 num_samples=${NUM_SAMPLES:-0}
 val_n=${VAL_N:-16}
 pass_at_k=${PASS_AT_K:-1,4,8,16}
-# DeepSeekMath-RL model context is 4096; keep 1024 tokens prompt headroom by default.
-max_new_tokens=${MAX_NEW_TOKENS:-3072}
+# DeepSeek-Math context is 4096 total (prompt + completion). Use --fill-context in eval script.
 max_model_len=${MAX_MODEL_LEN:-4096}
+fill_context=${FILL_CONTEXT:-1}
+max_new_tokens=${MAX_NEW_TOKENS:-}
 # Paper-style Pass@K sampling default; set TEMPERATURE=0 for greedy pass@1.
 temperature=${TEMPERATURE:-0.7}
 top_p=${TOP_P:-1.0}
@@ -73,8 +74,9 @@ echo "[EVAL] checkpoint_dir=${checkpoint_dir:-<none>}"
 echo "[EVAL] USE_LORA=${use_lora} (1=use LoRA, 0=base model)"
 echo "[EVAL] DATASETS=${datasets_csv}"
 echo "[EVAL] DATA_ROOT=${data_root}"
-echo "[EVAL] MAX_NEW_TOKENS=${max_new_tokens}"
 echo "[EVAL] MAX_MODEL_LEN=${max_model_len}"
+echo "[EVAL] FILL_CONTEXT=${fill_context} (prompt+completion <= max_model_len)"
+echo "[EVAL] MAX_NEW_TOKENS=${max_new_tokens:-<fill-context>}"
 echo "[EVAL] FORCE_BASE_TOKENIZER=${force_base_tokenizer} (1=base tokenizer/chat_template)"
 echo "[EVAL] DISABLE_CUSTOM_ALL_REDUCE=${disable_custom_all_reduce} (1=disable vLLM custom all-reduce)"
 echo "[EVAL] TEMPERATURE=${temperature} TOP_P=${top_p} TOP_K=${top_k}"
@@ -91,7 +93,6 @@ cmd=(
   --val-n "${val_n}"
   --pass-at-k "${pass_at_k}"
   --generate-batch-size "${generate_batch_size}"
-  --max-new-tokens "${max_new_tokens}"
   --temperature "${temperature}"
   --top-p "${top_p}"
   --top-k "${top_k}"
@@ -102,6 +103,12 @@ cmd=(
   --gpu-memory-utilization "${gpu_memory_utilization}"
   --max-model-len "${max_model_len}"
 )
+
+if [[ -n "${max_new_tokens}" ]]; then
+  cmd+=(--max-new-tokens "${max_new_tokens}")
+elif [[ "${fill_context}" == "1" ]]; then
+  cmd+=(--fill-context)
+fi
 
 IFS=',' read -ra _ds <<< "${datasets_csv}"
 for _n in "${_ds[@]}"; do
@@ -131,6 +138,8 @@ fi
 if [[ "${force_base_tokenizer}" == "1" ]]; then
   cmd+=(--force-base-tokenizer)
 fi
+
+cmd+=(--no-thinking --relaxed-answer-extraction)
 
 "${cmd[@]}"
 

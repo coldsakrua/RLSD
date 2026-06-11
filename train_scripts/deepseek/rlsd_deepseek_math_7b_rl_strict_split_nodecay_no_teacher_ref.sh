@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH -o logs/deepseek_logs/rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref.%j.out
+#SBATCH -o logs/deepseek_logs/rlsd_deepseek_math_7b_rl_strict_split_nodecay_no_teacher_ref.%j.out
 #SBATCH -p GPUA800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
 #SBATCH --mem-per-cpu=81920M
 #SBATCH --time=72:00:00
-#SBATCH --exclude=gpua800n26
+#SBATCH --exclude=gpua800n24,gpua800n07
 
 set -eo pipefail
 nvidia-smi
@@ -27,8 +27,8 @@ MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/d
 DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/gsm8k}
 DATASET_SPLIT=${DATASET_SPLIT:-train}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
-OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref}
-RUN_CONFIG=${RUN_CONFIG:-rlsd_deepseek_math_7b_rl_strict_split_flip_wrong_boost_nodecay_no_teacher_ref}
+OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/rlsd_deepseek_math_7b_rl_strict_split_nodecay_no_teacher_ref}
+RUN_CONFIG=${RUN_CONFIG:-rlsd_deepseek_math_7b_rl_strict_split_nodecay_no_teacher_ref}
 JOB_TAG="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR}/job_${JOB_TAG}"
 mkdir -p "${OUTPUT_DIR}"
@@ -168,7 +168,7 @@ if [ -n "${VLLM_MAX_MODEL_LEN}" ] && [ "${VLLM_MAX_MODEL_LEN}" != "0" ]; then
     VLLM_SERVE_ARGS+=(--max-model-len "${VLLM_MAX_MODEL_LEN}")
 fi
 
-echo "[ablation] wrong_path_positive_flip=true (base_adv<0 & g>0 -> positive adv)"
+echo "[ablation] sign_flip=false (correct adv>=0, wrong adv<=0; no token-gap sign flip)"
 echo "[ablation] teacher_include_reference_solution=${TEACHER_INCLUDE_REFERENCE_SOLUTION}"
 echo "[launch] context budget: max_length=${MAX_LENGTH} (prompt<=${MAX_PROMPT_LENGTH}, completion<=${MAX_COMPLETION_LENGTH})"
 echo "[launch] vLLM server on GPU ${GEN_CUDA_VISIBLE_DEVICES}: ${VLLM_SERVER_BASE_URL}"
@@ -191,7 +191,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --num_processes 1 \
     --gradient_accumulation_steps "${GRAD_ACC_STEPS}" \
     --main_process_port "${MAIN_PROCESS_PORT}" \
-    opsd_train_anchor_strict_split_flip_wrong_boost.py \
+    opsd_train_anchor_strict_split.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
     --dataset_split "${DATASET_SPLIT}" \

@@ -34,8 +34,6 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 model_path=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/qwen3-4b}
 
-# Thinking mode ON by default
-NO_THINKING=${NO_THINKING:-1}
 datasets_csv=${DATASETS:-hmmt25}
 data_format=${DATA_FORMAT:-auto}
 data_root=${DATA_ROOT:-/gpfs/share/home/2501210611/prefernce-learning/preference_learning/data}
@@ -44,28 +42,9 @@ use_lora=${USE_LORA:-1}
 num_samples=${NUM_SAMPLES:-0}
 val_n=${VAL_N:-16}
 pass_at_k=${PASS_AT_K:-1,4,8,16}
-if [[ -n "${MAX_NEW_TOKENS:-}" ]]; then
-  max_new_tokens="${MAX_NEW_TOKENS}"
-elif [[ "${NO_THINKING}" == "1" ]]; then
-  max_new_tokens=32768
-else
-  max_new_tokens=38912
-fi
-if [[ -n "${TEMPERATURE:-}" ]]; then
-  temperature="${TEMPERATURE}"
-elif [[ "${NO_THINKING}" == "1" ]]; then
-  temperature=0.7
-else
-  temperature=0.6
-fi
-
-if [[ -n "${TOP_P:-}" ]]; then
-  top_p="${TOP_P}"
-elif [[ "${NO_THINKING}" == "1" ]]; then
-  top_p=0.8
-else
-  top_p=0.95
-fi
+max_new_tokens=${MAX_NEW_TOKENS:-32768}
+temperature=${TEMPERATURE:-0.7}
+top_p=${TOP_P:-0.8}
 
 top_k=${TOP_K:-20}
 min_p=${MIN_P:-0.0}
@@ -84,26 +63,19 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
 else
   run_tag="${stamp}_seed0"
 fi
-if [[ "${NO_THINKING}" == "1" ]]; then
-  _eval_cot_dir=no_cot
-  _len_tag=32k
-else
-  _eval_cot_dir=cot
-  _len_tag=38912
-fi
-output_json=${OUTPUT_JSON:-outputs/eval_32k_hmmt25/${_eval_cot_dir}_${_len_tag}/seed0/eval_${run_tag}.json}
+output_json=${OUTPUT_JSON:-outputs/eval_32k_hmmt25/no_cot_32k/seed0/eval_${run_tag}.json}
+
 
 mkdir -p "$(dirname "${output_json}")"
+echo "[EVAL] mode=nothink datasets=${datasets_csv}"
 echo "[EVAL] model_path=${model_path}"
 echo "[EVAL] checkpoint_dir=${checkpoint_dir:-<none>}"
-echo "[EVAL] USE_LORA=${use_lora} (1=use LoRA, 0=disable LoRA)"
-echo "[EVAL] DATASETS=${datasets_csv}"
+echo "[EVAL] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} TENSOR_PARALLEL_SIZE=${tensor_parallel_size}"
+echo "[EVAL] GENERATE_BATCH_SIZE=${generate_batch_size} VAL_N=${val_n}"
+echo "[EVAL] USE_LORA=${use_lora}"
 echo "[EVAL] DATA_ROOT=${data_root}"
-echo "[EVAL] NO_THINKING=${NO_THINKING} (1=no CoT, 0=CoT) -> subdir=${_eval_cot_dir}_${_len_tag}"
-echo "[EVAL] MAX_NEW_TOKENS=${max_new_tokens} (thinking=38912, no_thinking=32768)"
-echo "[EVAL] FORCE_BASE_TOKENIZER=${force_base_tokenizer} (1=base tokenizer/chat_template)"
+echo "[EVAL] MAX_NEW_TOKENS=${max_new_tokens} TEMPERATURE=${temperature} TOP_P=${top_p}"
 echo "[EVAL] MAX_MODEL_LEN=${max_model_len}"
-echo "[EVAL] DISABLE_CUSTOM_ALL_REDUCE=${disable_custom_all_reduce} (1=disable vLLM custom all-reduce)"
 echo "[EVAL] SEED=${seed}"
 echo "[EVAL] TEMPERATURE=${temperature}"
 echo "[EVAL] output_json=${output_json}"
@@ -128,6 +100,7 @@ cmd=(
   --tensor-parallel-size "${tensor_parallel_size}"
   --gpu-memory-utilization "${gpu_memory_utilization}"
   --max-model-len "${max_model_len}"
+  --no-thinking
 )
 
 IFS=',' read -ra _ds <<< "${datasets_csv}"
@@ -155,9 +128,6 @@ if [[ "${disable_custom_all_reduce}" == "1" ]]; then
   cmd+=(--disable-custom-all-reduce)
 fi
 
-if [[ "${NO_THINKING}" == "1" ]]; then
-  cmd+=(--no-thinking)
-fi
 
 if [[ "${force_base_tokenizer}" == "1" ]]; then
   cmd+=(--force-base-tokenizer)

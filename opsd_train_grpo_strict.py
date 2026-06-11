@@ -58,6 +58,7 @@ class ScriptArguments:
     reward_repeat_triplet_levenshtein_threshold: int = 0
     disable_thinking_in_chat_template: bool = True
     reward_boxed_last_token_fraction: float = 0.0
+    relaxed_answer_extraction: bool = False
     reward_binary_threshold: float = 0.5
 
 
@@ -278,6 +279,7 @@ def main():
     configure_math_reward_extraction(
         tokenizer=tokenizer,
         boxed_last_token_fraction=float(script_args.reward_boxed_last_token_fraction),
+        relaxed_answer_extraction=bool(script_args.relaxed_answer_extraction),
     )
 
     if script_args.disable_thinking_in_chat_template:
@@ -370,7 +372,12 @@ def main():
         preview = ", ".join(non_lora_trainable[:8])
         raise RuntimeError(f"Found non-LoRA trainable params under strict_lora_only: {preview}")
 
-    trainer.train()
+    resume_ckpt = getattr(training_args, "resume_from_checkpoint", None)
+    if not resume_ckpt or str(resume_ckpt).lower() in {"none", "false"}:
+        resume_ckpt = None
+    else:
+        print(f"[train] resume_from_checkpoint={resume_ckpt}", flush=True)
+    trainer.train(resume_from_checkpoint=resume_ckpt)
     trainer.save_model(training_args.output_dir)
     if trainer.accelerator.is_main_process:
         tokenizer.save_pretrained(training_args.output_dir)

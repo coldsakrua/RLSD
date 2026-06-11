@@ -23,7 +23,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset ROCR_VISIBLE_DEVICES
 
 MODEL_PATH=${MODEL_PATH:-/gpfs/share/home/2501210611/labShare/2501210611/model/deepseek-math-7b-rl}
-DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/dapo/dapo-math-17k.parquet}
+DATASET_PATH=${DATASET_PATH:-${BASE_DIR}/data/gsm8k}
+DATASET_SPLIT=${DATASET_SPLIT:-train}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-${BASE_DIR}/outputs/hf_cache}
 OUTPUT_DIR=${OUTPUT_DIR:-${BASE_DIR}/outputs/opsd_deepseek_math_7b_rl}
 RUN_CONFIG=${RUN_CONFIG:-opsd_deepseek_math_7b_rl}
@@ -39,19 +40,20 @@ mkdir -p "${WANDB_DATA_DIR}"
 
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-12949}
 GRAD_ACC_STEPS=${GRAD_ACC_STEPS:-8}
-PER_DEVICE_BS=${PER_DEVICE_BS:-2}
-MAX_STEPS=${MAX_STEPS:-300}
-MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-3072}
-# Keep enough prompt budget: trainer computes max_prompt_length = max_length - max_completion_length.
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-MAX_LENGTH=$((MAX_COMPLETION_LENGTH + MAX_PROMPT_LENGTH))
+PER_DEVICE_BS=${PER_DEVICE_BS:-8}
+MAX_STEPS=${MAX_STEPS:-1200}
+# DeepSeek-Math context: prompt + completion <= 4096 (https://github.com/deepseek-ai/DeepSeek-Math)
+MODEL_MAX_LENGTH=${MODEL_MAX_LENGTH:-4096}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-256}
+MAX_COMPLETION_LENGTH=${MAX_COMPLETION_LENGTH:-$((MODEL_MAX_LENGTH - MAX_PROMPT_LENGTH))}
+MAX_LENGTH=${MAX_LENGTH:-${MODEL_MAX_LENGTH}}
 MAX_TEACHER_PROMPT_LENGTH=${MAX_TEACHER_PROMPT_LENGTH:-${MAX_PROMPT_LENGTH}}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 PROMPT_PREFIX=${PROMPT_PREFIX:-}
 PROMPT_SUFFIX=${PROMPT_SUFFIX:-}
 NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX=${NORMALIZE_MATH_PROMPT_TO_STANDARD_SUFFIX:-false}
 MATH_INSTRUCTION_SUFFIX=${MATH_INSTRUCTION_SUFFIX:-}
-USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-true}
+USE_DAPO_RAW_PROMPT=${USE_DAPO_RAW_PROMPT:-false}
 
 # OPSD paper/repo 4b non-thinking defaults, while keeping this repo's length budget.
 LEARNING_RATE=${LEARNING_RATE:-5e-6}
@@ -111,7 +113,8 @@ FIXED_TEACHER=${FIXED_TEACHER:-true}
 STUDENT_ENABLE_THINKING=${STUDENT_ENABLE_THINKING:-false}
 TEACHER_ENABLE_THINKING=${TEACHER_ENABLE_THINKING:-false}
 STUDENT_PROMPT_AS_CHAT=${STUDENT_PROMPT_AS_CHAT:-false}
-DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-false}
+DISABLE_THINKING_IN_CHAT_TEMPLATE=${DISABLE_THINKING_IN_CHAT_TEMPLATE:-true}
+RELAXED_ANSWER_EXTRACTION=${RELAXED_ANSWER_EXTRACTION:-true}
 REWARD_BOXED_LAST_TOKEN_FRACTION=${REWARD_BOXED_LAST_TOKEN_FRACTION:-0.05}
 
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"q_proj k_proj v_proj o_proj gate_proj up_proj down_proj"}
@@ -163,7 +166,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     official_opsd_train.py \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset_path "${DATASET_PATH}" \
-    --dataset_split train \
+    --dataset_split "${DATASET_SPLIT}" \
     --dataset_cache_dir "${DATASET_CACHE_DIR}" \
     --prompt_prefix "${PROMPT_PREFIX}" \
     --prompt_suffix "${PROMPT_SUFFIX}" \
@@ -179,7 +182,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --max_steps "${MAX_STEPS}" \
     --num_generations 1 \
     --max_completion_length "${MAX_COMPLETION_LENGTH}" \
-    --save_steps 50 \
+    --save_steps 100 \
     --logging_steps 1 \
     --attn_implementation "${ATTN_IMPLEMENTATION}" \
     --torch_dtype bfloat16 \
@@ -211,6 +214,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES}" accelerate launch \
     --teacher_enable_thinking "${TEACHER_ENABLE_THINKING}" \
     --student_prompt_as_chat "${STUDENT_PROMPT_AS_CHAT}" \
     --disable_thinking_in_chat_template "${DISABLE_THINKING_IN_CHAT_TEMPLATE}" \
+    --relaxed_answer_extraction "${RELAXED_ANSWER_EXTRACTION}" \
     --reward_boxed_last_token_fraction "${REWARD_BOXED_LAST_TOKEN_FRACTION}" \
     --vllm_sync_frequency "${VLLM_SYNC_FREQUENCY}" \
     --save_generation_steps "${SAVE_GENERATION_STEPS}" \
